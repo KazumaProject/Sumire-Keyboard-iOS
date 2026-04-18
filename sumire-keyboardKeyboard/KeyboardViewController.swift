@@ -26,9 +26,13 @@ final class KeyboardViewController: UIInputViewController {
 
     private final class KeyboardButton: UIButton {
         let action: KeyAction
+        private let normalBackgroundColor: UIColor
+        private let highlightedBackgroundColor: UIColor
 
         init(title: String, action: KeyAction, style: ButtonStyle) {
             self.action = action
+            self.normalBackgroundColor = style.backgroundColor
+            self.highlightedBackgroundColor = style.highlightedBackgroundColor
             super.init(frame: .zero)
 
             var configuration = UIButton.Configuration.filled()
@@ -48,8 +52,28 @@ final class KeyboardViewController: UIInputViewController {
             translatesAutoresizingMaskIntoConstraints = false
         }
 
+        override var isHighlighted: Bool {
+            didSet {
+                updateBackgroundForCurrentState()
+            }
+        }
+
+        override var isSelected: Bool {
+            didSet {
+                updateBackgroundForCurrentState()
+            }
+        }
+
         required init?(coder: NSCoder) {
             return nil
+        }
+
+        private func updateBackgroundForCurrentState() {
+            var updatedConfiguration = configuration
+            updatedConfiguration?.baseBackgroundColor = (isHighlighted || isSelected)
+                ? highlightedBackgroundColor
+                : normalBackgroundColor
+            configuration = updatedConfiguration
         }
     }
 
@@ -97,26 +121,252 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private final class FlickGuideView: UIView {
-        private let labelSize = CGSize(width: 44, height: 36)
-        private var labels: [FlickDirection: UILabel] = [:]
+        enum Mode {
+            case flick
+            case longPress
+        }
+
+        private final class CandidateView: UIView {
+            private let shapeLayer = CAShapeLayer()
+            private let label = UILabel()
+            private var pointerDirection: FlickDirection?
+            private var fillColor = UIColor.systemBackground
+            private var strokeColor = UIColor.clear
+            private var labelFrame = CGRect.zero
+            private var usesFlickShape = false
+
+            override init(frame: CGRect) {
+                super.init(frame: frame)
+
+                isUserInteractionEnabled = false
+                backgroundColor = .clear
+                layer.allowsEdgeAntialiasing = true
+                layer.addSublayer(shapeLayer)
+
+                label.textAlignment = .center
+                label.adjustsFontSizeToFitWidth = true
+                label.minimumScaleFactor = 0.7
+                label.textColor = .label
+                addSubview(label)
+            }
+
+            required init?(coder: NSCoder) {
+                return nil
+            }
+
+            func configure(
+                text: String?,
+                isSelected: Bool,
+                isDimmed: Bool,
+                pointerDirection: FlickDirection?
+            ) {
+                self.pointerDirection = pointerDirection
+                usesFlickShape = pointerDirection != nil
+                label.text = text
+                isHidden = text == nil
+
+                fillColor = usesFlickShape || isSelected == false ? .white : .systemBlue
+                strokeColor = usesFlickShape ? .clear : UIColor.separator.withAlphaComponent(0.18)
+                label.textColor = usesFlickShape
+                    ? .label
+                    : (isSelected ? .white : (isDimmed ? .secondaryLabel : .label))
+                setNeedsLayout()
+            }
+
+            override func layoutSubviews() {
+                super.layoutSubviews()
+
+                shapeLayer.frame = bounds
+                shapeLayer.path = makePath(in: bounds).cgPath
+                shapeLayer.fillColor = fillColor.cgColor
+                shapeLayer.strokeColor = strokeColor.cgColor
+                shapeLayer.lineWidth = 0.5
+
+                label.frame = labelFrame.insetBy(dx: 4, dy: 2)
+                let fontSize = min(42, max(26, labelFrame.height * 0.52))
+                label.font = .systemFont(ofSize: fontSize, weight: .regular)
+            }
+
+            private func makePath(in bounds: CGRect) -> UIBezierPath {
+                let cornerRadius = min(18, bounds.height * 0.22)
+                guard let pointerDirection else {
+                    labelFrame = bounds
+                    return UIBezierPath(roundedRect: bounds, cornerRadius: cornerRadius)
+                }
+
+                let tailLength = min(36, max(22, min(bounds.width, bounds.height) * 0.28))
+
+                switch pointerDirection {
+                case .left:
+                    labelFrame = CGRect(x: 0, y: 0, width: bounds.width - tailLength, height: bounds.height)
+                    return makeRightTailPath(bodyRect: labelFrame, tipX: bounds.maxX, cornerRadius: cornerRadius)
+                case .right:
+                    labelFrame = CGRect(x: tailLength, y: 0, width: bounds.width - tailLength, height: bounds.height)
+                    return makeLeftTailPath(bodyRect: labelFrame, tipX: bounds.minX, cornerRadius: cornerRadius)
+                case .up:
+                    labelFrame = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height - tailLength)
+                    return makeBottomTailPath(bodyRect: labelFrame, tipY: bounds.maxY, cornerRadius: cornerRadius)
+                case .down:
+                    labelFrame = CGRect(x: 0, y: tailLength, width: bounds.width, height: bounds.height - tailLength)
+                    return makeTopTailPath(bodyRect: labelFrame, tipY: bounds.minY, cornerRadius: cornerRadius)
+                case .center:
+                    labelFrame = bounds
+                    return UIBezierPath(roundedRect: bounds, cornerRadius: cornerRadius)
+                }
+            }
+
+            private func makeRightTailPath(bodyRect: CGRect, tipX: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
+                let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+                let baseTop = bodyRect.minY + radius
+                let baseBottom = bodyRect.maxY - radius
+                let path = UIBezierPath()
+
+                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: baseTop))
+                path.addLine(to: CGPoint(x: tipX, y: bodyRect.midY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: baseBottom))
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
+                )
+                path.close()
+                return path
+            }
+
+            private func makeLeftTailPath(bodyRect: CGRect, tipX: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
+                let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+                let baseTop = bodyRect.minY + radius
+                let baseBottom = bodyRect.maxY - radius
+                let path = UIBezierPath()
+
+                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: baseBottom))
+                path.addLine(to: CGPoint(x: tipX, y: bodyRect.midY))
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: baseTop))
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
+                )
+                path.close()
+                return path
+            }
+
+            private func makeBottomTailPath(bodyRect: CGRect, tipY: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
+                let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+                let baseLeft = bodyRect.minX + radius
+                let baseRight = bodyRect.maxX - radius
+                let path = UIBezierPath()
+
+                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: baseRight, y: bodyRect.maxY))
+                path.addLine(to: CGPoint(x: bodyRect.midX, y: tipY))
+                path.addLine(to: CGPoint(x: baseLeft, y: bodyRect.maxY))
+                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
+                )
+                path.close()
+                return path
+            }
+
+            private func makeTopTailPath(bodyRect: CGRect, tipY: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
+                let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
+                let baseLeft = bodyRect.minX + radius
+                let baseRight = bodyRect.maxX - radius
+                let path = UIBezierPath()
+
+                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: baseLeft, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: bodyRect.midX, y: tipY))
+                path.addLine(to: CGPoint(x: baseRight, y: bodyRect.minY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
+                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
+                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
+                path.addQuadCurve(
+                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
+                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
+                )
+                path.close()
+                return path
+            }
+        }
+
+        private let flickTailOverlap: CGFloat = 0
+        private var candidateViews: [FlickDirection: CandidateView] = [:]
         private(set) var showsAllDirections = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
 
             backgroundColor = .clear
+            clipsToBounds = false
             isUserInteractionEnabled = false
 
             for direction in [FlickDirection.left, .up, .right, .down, .center] {
-                let label = UILabel()
-                label.textAlignment = .center
-                label.font = .systemFont(ofSize: 20, weight: .bold)
-                label.textColor = .white
-                label.backgroundColor = UIColor.black.withAlphaComponent(0.78)
-                label.layer.cornerRadius = 8
-                label.layer.masksToBounds = true
-                addSubview(label)
-                labels[direction] = label
+                let candidateView = CandidateView()
+                addSubview(candidateView)
+                candidateViews[direction] = candidateView
             }
         }
 
@@ -124,64 +374,127 @@ final class KeyboardViewController: UIInputViewController {
             return nil
         }
 
-        func configure(candidates: [FlickDirection: String], selectedDirection: FlickDirection, showsAllDirections: Bool) {
-            self.showsAllDirections = showsAllDirections
+        func configure(
+            candidates: [FlickDirection: String],
+            selectedDirection: FlickDirection,
+            mode: Mode,
+            keyFrame: CGRect
+        ) {
+            showsAllDirections = mode == .longPress
 
-            for (direction, label) in labels {
-                label.text = candidates[direction]
-                let shouldShow = showsAllDirections || direction == .center || direction == selectedDirection
-                label.isHidden = candidates[direction] == nil || !shouldShow
-                label.backgroundColor = direction == selectedDirection
-                    ? UIColor.systemBlue.withAlphaComponent(0.9)
-                    : UIColor.black.withAlphaComponent(0.78)
+            guard mode == .longPress || selectedDirection != .center else {
+                isHidden = true
+                return
+            }
+
+            let layoutFrames = makeLayoutFrames(
+                keyFrame: keyFrame,
+                selectedDirection: selectedDirection,
+                mode: mode
+            )
+            guard let containerFrame = layoutFrames.values.reduce(nil, { partial, frame in
+                partial?.union(frame) ?? frame
+            }) else {
+                isHidden = true
+                return
+            }
+
+            frame = containerFrame
+
+            for (direction, candidateView) in candidateViews {
+                guard let candidateFrame = layoutFrames[direction] else {
+                    candidateView.isHidden = true
+                    continue
+                }
+
+                let isSelected = direction == selectedDirection
+                let pointerDirection = mode == .flick ? selectedDirection : nil
+                candidateView.frame = candidateFrame.offsetBy(
+                    dx: -containerFrame.minX,
+                    dy: -containerFrame.minY
+                )
+                candidateView.configure(
+                    text: candidates[direction],
+                    isSelected: isSelected,
+                    isDimmed: false,
+                    pointerDirection: pointerDirection
+                )
+            }
+
+            isHidden = false
+        }
+
+        private func makeLayoutFrames(
+            keyFrame: CGRect,
+            selectedDirection: FlickDirection,
+            mode: Mode
+        ) -> [FlickDirection: CGRect] {
+            switch mode {
+            case .longPress:
+                let stepX = keyFrame.width
+                let stepY = keyFrame.height
+                return [
+                    .center: keyFrame,
+                    .left: keyFrame.offsetBy(dx: -stepX, dy: 0),
+                    .up: keyFrame.offsetBy(dx: 0, dy: -stepY),
+                    .right: keyFrame.offsetBy(dx: stepX, dy: 0),
+                    .down: keyFrame.offsetBy(dx: 0, dy: stepY)
+                ]
+            case .flick:
+                let tailLength = min(36, max(22, min(keyFrame.width, keyFrame.height) * 0.28))
+                let frame: CGRect
+                switch selectedDirection {
+                case .left:
+                    frame = CGRect(
+                        x: keyFrame.minX - keyFrame.width,
+                        y: keyFrame.minY,
+                        width: keyFrame.width + tailLength,
+                        height: keyFrame.height
+                    )
+                case .right:
+                    frame = CGRect(
+                        x: keyFrame.maxX - tailLength + flickTailOverlap,
+                        y: keyFrame.minY,
+                        width: keyFrame.width + tailLength,
+                        height: keyFrame.height
+                    )
+                case .up:
+                    frame = CGRect(
+                        x: keyFrame.minX,
+                        y: keyFrame.minY - keyFrame.height,
+                        width: keyFrame.width,
+                        height: keyFrame.height + tailLength
+                    )
+                case .down:
+                    frame = CGRect(
+                        x: keyFrame.minX,
+                        y: keyFrame.maxY - tailLength + flickTailOverlap,
+                        width: keyFrame.width,
+                        height: keyFrame.height + tailLength
+                    )
+                case .center:
+                    return [:]
+                }
+                return [selectedDirection: frame]
             }
         }
 
-        override func layoutSubviews() {
-            super.layoutSubviews()
-
-            let center = CGPoint(x: bounds.midX, y: bounds.midY)
-            labels[.center]?.frame = CGRect(
-                x: center.x - (labelSize.width / 2),
-                y: center.y - (labelSize.height / 2),
-                width: labelSize.width,
-                height: labelSize.height
-            )
-            labels[.left]?.frame = CGRect(
-                x: center.x - labelSize.width - 10,
-                y: center.y - (labelSize.height / 2),
-                width: labelSize.width,
-                height: labelSize.height
-            )
-            labels[.up]?.frame = CGRect(
-                x: center.x - (labelSize.width / 2),
-                y: center.y - labelSize.height - 10,
-                width: labelSize.width,
-                height: labelSize.height
-            )
-            labels[.right]?.frame = CGRect(
-                x: center.x + 10,
-                y: center.y - (labelSize.height / 2),
-                width: labelSize.width,
-                height: labelSize.height
-            )
-            labels[.down]?.frame = CGRect(
-                x: center.x - (labelSize.width / 2),
-                y: center.y + 10,
-                width: labelSize.width,
-                height: labelSize.height
-            )
+        func hideAndReset() {
+            showsAllDirections = false
+            isHidden = true
         }
     }
 
     private struct ButtonStyle {
         let backgroundColor: UIColor
+        let highlightedBackgroundColor: UIColor
         let foregroundColor: UIColor
         let font: UIFont
         let shadowOpacity: Float
 
         static let kana = ButtonStyle(
             backgroundColor: .white,
+            highlightedBackgroundColor: .systemGray3,
             foregroundColor: .label,
             font: .systemFont(ofSize: 24, weight: .semibold),
             shadowOpacity: 0.16
@@ -189,6 +502,7 @@ final class KeyboardViewController: UIInputViewController {
 
         static let function = ButtonStyle(
             backgroundColor: .systemGray3,
+            highlightedBackgroundColor: .systemGray2,
             foregroundColor: .label,
             font: .systemFont(ofSize: 17, weight: .semibold),
             shadowOpacity: 0.1
@@ -196,6 +510,7 @@ final class KeyboardViewController: UIInputViewController {
 
         static let primary = ButtonStyle(
             backgroundColor: .systemBlue,
+            highlightedBackgroundColor: UIColor.systemBlue.withAlphaComponent(0.72),
             foregroundColor: .white,
             font: .systemFont(ofSize: 17, weight: .bold),
             shadowOpacity: 0.12
@@ -245,21 +560,24 @@ final class KeyboardViewController: UIInputViewController {
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
+    private weak var activeKanaButton: KeyboardButton?
     private var deleteRepeatTimer: Timer?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
+    private static var cachedKanaKanjiConverter: KanaKanjiConverter?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
         view.backgroundColor = .systemGray5
+        view.clipsToBounds = false
         setupKeyboardLayout()
         updatePreedit()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        scheduleKanaKanjiConverterLoad()
+        scheduleKanaKanjiConverterLoad(delay: 0.25)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -277,6 +595,7 @@ final class KeyboardViewController: UIInputViewController {
         kanaKanjiLoadGeneration += 1
         isLoadingKanaKanjiConverter = false
         kanaKanjiConverter = nil
+        Self.cachedKanaKanjiConverter = nil
         converterLoadFailureMessage = nil
         updatePreedit()
     }
@@ -445,11 +764,13 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
-        guard case .kana(let key) = sender.action else {
+        guard case .kana = sender.action else {
             return
         }
 
-        showFlickGuide(for: key, from: sender, selectedDirection: .center, showsAllDirections: false)
+        activeKanaButton = sender
+        sender.isHighlighted = true
+        hideFlickGuide()
     }
 
     @objc private func handleTouchDrag(_ sender: KeyboardButton, event: UIEvent) {
@@ -457,17 +778,25 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        activeKanaButton = sender
+        sender.isHighlighted = true
         let direction = flickDirection(for: sender, event: event)
+        if direction == .center, flickGuideView.showsAllDirections == false {
+            hideFlickGuide()
+            return
+        }
+
         showFlickGuide(
             for: key,
             from: sender,
             selectedDirection: direction,
-            showsAllDirections: flickGuideView.showsAllDirections
+            mode: flickGuideView.showsAllDirections ? .longPress : .flick
         )
     }
 
     @objc private func handleTouchCancel(_ sender: KeyboardButton) {
         stopDeleteRepeat()
+        clearActiveKanaButton()
         hideFlickGuide()
     }
 
@@ -478,12 +807,15 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        showFlickGuide(for: key, from: button, selectedDirection: .center, showsAllDirections: true)
+        activeKanaButton = button
+        button.isHighlighted = true
+        showFlickGuide(for: key, from: button, selectedDirection: .center, mode: .longPress)
     }
 
     @objc private func handleKeyRelease(_ sender: KeyboardButton, event: UIEvent) {
         if suppressNextButtonRelease {
             suppressNextButtonRelease = false
+            clearActiveKanaButton()
             hideFlickGuide()
             return
         }
@@ -519,6 +851,7 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
 
+        clearActiveKanaButton()
         hideFlickGuide()
     }
 
@@ -680,31 +1013,25 @@ final class KeyboardViewController: UIInputViewController {
         for key: KanaKey,
         from button: KeyboardButton,
         selectedDirection: FlickDirection,
-        showsAllDirections: Bool
+        mode: FlickGuideView.Mode
     ) {
         let buttonFrame = button.convert(button.bounds, to: view)
-        let guideSize = CGSize(width: 150, height: 150)
-        let rawOrigin = CGPoint(
-            x: buttonFrame.midX - (guideSize.width / 2),
-            y: buttonFrame.midY - (guideSize.height / 2)
-        )
-        let origin = CGPoint(
-            x: min(max(rawOrigin.x, 4), max(view.bounds.width - guideSize.width - 4, 4)),
-            y: min(max(rawOrigin.y, 4), max(view.bounds.height - guideSize.height - 4, 4))
-        )
-
-        flickGuideView.frame = CGRect(origin: origin, size: guideSize)
         flickGuideView.configure(
             candidates: flickGuideCandidates(for: key),
             selectedDirection: selectedDirection,
-            showsAllDirections: showsAllDirections
+            mode: mode,
+            keyFrame: buttonFrame
         )
-        flickGuideView.isHidden = false
         view.bringSubviewToFront(flickGuideView)
     }
 
     private func hideFlickGuide() {
-        flickGuideView.isHidden = true
+        flickGuideView.hideAndReset()
+    }
+
+    private func clearActiveKanaButton() {
+        activeKanaButton?.isHighlighted = false
+        activeKanaButton = nil
     }
 
     private func flickGuideCandidates(for key: KanaKey) -> [FlickDirection: String] {
@@ -853,21 +1180,18 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func moveLeftKey() {
-        guard composingText.isEmpty == false else {
-            textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
-            return
-        }
-
-        moveConversionUpperBound(by: -1)
+        moveCursor(byCharacterOffset: -1)
     }
 
     private func moveRightKey() {
-        guard composingText.isEmpty == false else {
-            textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
-            return
-        }
+        moveCursor(byCharacterOffset: 1)
+    }
 
-        moveConversionUpperBound(by: 1)
+    private func moveCursor(byCharacterOffset offset: Int) {
+        if composingText.isEmpty == false {
+            commitRenderedComposingTextAsTyped()
+        }
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
     }
 
     private func moveConversionUpperBound(by offset: Int) {
@@ -1033,7 +1357,7 @@ final class KeyboardViewController: UIInputViewController {
         return count
     }
 
-    private func scheduleKanaKanjiConverterLoad() {
+    private func scheduleKanaKanjiConverterLoad(delay: TimeInterval = 0.05) {
         guard kanaKanjiConverter == nil,
               isLoadingKanaKanjiConverter == false,
               scheduledKanaKanjiLoad == nil else {
@@ -1049,11 +1373,22 @@ final class KeyboardViewController: UIInputViewController {
             self.loadKanaKanjiConverter()
         }
         scheduledKanaKanjiLoad = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
+        if delay <= 0 {
+            DispatchQueue.main.async(execute: workItem)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        }
     }
 
     private func loadKanaKanjiConverter() {
         guard kanaKanjiConverter == nil, isLoadingKanaKanjiConverter == false else {
+            return
+        }
+
+        if let cachedConverter = Self.cachedKanaKanjiConverter {
+            kanaKanjiConverter = cachedConverter
+            converterLoadFailureMessage = nil
+            updatePreedit()
             return
         }
 
@@ -1089,6 +1424,7 @@ final class KeyboardViewController: UIInputViewController {
                 switch result {
                 case .success(let converter):
                     self.kanaKanjiConverter = converter
+                    Self.cachedKanaKanjiConverter = converter
                     self.converterLoadFailureMessage = nil
                 case .failure(let error):
                     self.kanaKanjiConverter = nil

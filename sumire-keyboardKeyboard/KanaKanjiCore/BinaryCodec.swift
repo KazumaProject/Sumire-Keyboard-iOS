@@ -50,32 +50,42 @@ struct BinaryReader {
             throw BinaryReaderError.unexpectedEndOfFile
         }
 
-        let bytes = Array(data[offset..<(offset + count)])
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: count)
+        let bytes = Array(data[start..<end])
         offset += count
         return bytes
     }
 
     mutating func readUInt64() throws -> UInt64 {
-        let bytes = try readBytes(count: 8)
-        var value: UInt64 = 0
-        for (index, byte) in bytes.enumerated() {
-            value |= UInt64(byte) << UInt64(index * 8)
-        }
-        return value
+        let value = try readFixedWidthInteger(UInt64.self)
+        return UInt64(littleEndian: value)
     }
 
     mutating func readUInt32LE() throws -> UInt32 {
-        let bytes = try readBytes(count: 4)
-        var value: UInt32 = 0
-        for (index, byte) in bytes.enumerated() {
-            value |= UInt32(byte) << UInt32(index * 8)
-        }
-        return value
+        let value = try readFixedWidthInteger(UInt32.self)
+        return UInt32(littleEndian: value)
     }
 
     mutating func readUInt16LE() throws -> UInt16 {
-        let bytes = try readBytes(count: 2)
-        return UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
+        let value = try readFixedWidthInteger(UInt16.self)
+        return UInt16(littleEndian: value)
+    }
+
+    mutating func readUInt64ArrayLE(count: Int) throws -> [UInt64] {
+        try readFixedWidthIntegerArray(UInt64.self, count: count)
+    }
+
+    mutating func readUInt16ArrayLE(count: Int) throws -> [UInt16] {
+        try readFixedWidthIntegerArray(UInt16.self, count: count)
+    }
+
+    mutating func readInt32ArrayLE(count: Int) throws -> [Int32] {
+        try readFixedWidthIntegerArray(Int32.self, count: count)
+    }
+
+    mutating func readInt16ArrayLE(count: Int) throws -> [Int16] {
+        try readFixedWidthIntegerArray(Int16.self, count: count)
     }
 
     mutating func readInt64() throws -> Int64 {
@@ -117,6 +127,53 @@ struct BinaryReader {
 
     var isAtEnd: Bool {
         offset == data.count
+    }
+
+    private mutating func readFixedWidthInteger<T: FixedWidthInteger>(_ type: T.Type) throws -> T {
+        let byteCount = MemoryLayout<T>.size
+        guard offset + byteCount <= data.count else {
+            throw BinaryReaderError.unexpectedEndOfFile
+        }
+
+        var value: T = 0
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: byteCount)
+        _ = withUnsafeMutableBytes(of: &value) { rawBuffer in
+            data.copyBytes(to: rawBuffer, from: start..<end)
+        }
+        offset += byteCount
+        return value
+    }
+
+    private mutating func readFixedWidthIntegerArray<T: FixedWidthInteger>(
+        _ type: T.Type,
+        count: Int
+    ) throws -> [T] {
+        let elementByteCount = MemoryLayout<T>.size
+        guard offset <= data.count,
+              count >= 0,
+              count <= (data.count - offset) / elementByteCount else {
+            throw BinaryReaderError.unexpectedEndOfFile
+        }
+
+        let currentOffset = offset
+        offset += count * elementByteCount
+        var values = Array<T>(unsafeUninitializedCapacity: count) { buffer, initializedCount in
+            let rawBuffer = UnsafeMutableRawBufferPointer(buffer)
+            let start = data.index(data.startIndex, offsetBy: currentOffset)
+            let end = data.index(start, offsetBy: count * elementByteCount)
+            data.copyBytes(to: rawBuffer, from: start..<end)
+            initializedCount = count
+        }
+
+        #if _endian(little)
+        return values
+        #else
+        for index in values.indices {
+            values[index] = T(littleEndian: values[index])
+        }
+        return values
+        #endif
     }
 }
 

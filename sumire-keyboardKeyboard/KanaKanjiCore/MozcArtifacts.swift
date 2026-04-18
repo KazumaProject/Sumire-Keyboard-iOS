@@ -5,49 +5,27 @@ struct CompatibleBitVector: Sendable {
     let words: [UInt64]
 
     private let rank1ByWord: [Int]
-    private let zeroPositions: [Int]
-    private let onePositions: [Int]
 
     init(bits: [Bool]) {
         self.bitCount = bits.count
 
         var words = Array(repeating: UInt64(0), count: (bits.count + 63) / 64)
-        var zeros: [Int] = []
-        var ones: [Int] = []
 
         for (index, bit) in bits.enumerated() {
             if bit {
                 words[index / 64] |= UInt64(1) << UInt64(index % 64)
-                ones.append(index)
-            } else {
-                zeros.append(index)
             }
         }
 
         self.words = words
         self.rank1ByWord = Self.makeRank(words)
-        self.zeroPositions = zeros
-        self.onePositions = ones
     }
 
     init(bitCount: Int, words: [UInt64]) {
         self.bitCount = bitCount
         self.words = words
 
-        var zeros: [Int] = []
-        var ones: [Int] = []
-        for index in 0..<bitCount {
-            let bit = ((words[index / 64] >> UInt64(index % 64)) & 1) == 1
-            if bit {
-                ones.append(index)
-            } else {
-                zeros.append(index)
-            }
-        }
-
         self.rank1ByWord = Self.makeRank(words)
-        self.zeroPositions = zeros
-        self.onePositions = ones
     }
 
     func get(_ index: Int) -> Bool {
@@ -79,17 +57,51 @@ struct CompatibleBitVector: Sendable {
     }
 
     func select0(_ oneBasedRank: Int) -> Int {
-        guard oneBasedRank > 0, oneBasedRank <= zeroPositions.count else {
+        guard oneBasedRank > 0,
+              bitCount > 0,
+              rank0(bitCount - 1) >= oneBasedRank else {
             return -1
         }
-        return zeroPositions[oneBasedRank - 1]
+
+        var low = 0
+        var high = bitCount - 1
+        var result = -1
+
+        while low <= high {
+            let mid = low + ((high - low) / 2)
+            if rank0(mid) >= oneBasedRank {
+                result = mid
+                high = mid - 1
+            } else {
+                low = mid + 1
+            }
+        }
+
+        return result
     }
 
     func select1(_ oneBasedRank: Int) -> Int {
-        guard oneBasedRank > 0, oneBasedRank <= onePositions.count else {
+        guard oneBasedRank > 0,
+              bitCount > 0,
+              rank1(bitCount - 1) >= oneBasedRank else {
             return -1
         }
-        return onePositions[oneBasedRank - 1]
+
+        var low = 0
+        var high = bitCount - 1
+        var result = -1
+
+        while low <= high {
+            let mid = low + ((high - low) / 2)
+            if rank1(mid) >= oneBasedRank {
+                result = mid
+                high = mid - 1
+            } else {
+                low = mid + 1
+            }
+        }
+
+        return result
     }
 
     private static func makeRank(_ words: [UInt64]) -> [Int] {

@@ -193,50 +193,35 @@ enum MozcArtifactIO {
     }
 
     private static func readLOUDS(_ fileURL: URL) throws -> CompatibleLOUDS {
-        var reader = BinaryReader(data: try Data(contentsOf: fileURL))
+        var reader = BinaryReader(data: try Data(contentsOf: fileURL, options: [.mappedIfSafe]))
         let lbs = try readBitVector(reader: &reader)
         let leaf = try readBitVector(reader: &reader)
         let labelCount = try reader.readIntCount()
-        var labels: [UInt16] = []
-        labels.reserveCapacity(labelCount)
-        for _ in 0..<labelCount {
-            labels.append(try reader.readUInt16LE())
-        }
+        let labels = try reader.readUInt16ArrayLE(count: labelCount)
         return CompatibleLOUDS(lbs: lbs, isLeaf: leaf, labels: labels, termIds: nil)
     }
 
     private static func readLOUDSWithTermId(_ fileURL: URL) throws -> CompatibleLOUDS {
-        var reader = BinaryReader(data: try Data(contentsOf: fileURL))
+        var reader = BinaryReader(data: try Data(contentsOf: fileURL, options: [.mappedIfSafe]))
         let lbs = try readBitVector(reader: &reader)
         let leaf = try readBitVector(reader: &reader)
         let labelCount = try reader.readIntCount()
-        var labels: [UInt16] = []
-        labels.reserveCapacity(labelCount)
-        for _ in 0..<labelCount {
-            labels.append(try reader.readUInt16LE())
-        }
+        let labels = try reader.readUInt16ArrayLE(count: labelCount)
         let termCount = try reader.readIntCount()
-        var termIds: [Int32] = []
-        termIds.reserveCapacity(termCount)
-        for _ in 0..<termCount {
-            termIds.append(try reader.readInt32LE())
-        }
+        let termIds = try reader.readInt32ArrayLE(count: termCount)
         return CompatibleLOUDS(lbs: lbs, isLeaf: leaf, labels: labels, termIds: termIds)
     }
 
     private static func readTokenArray(_ fileURL: URL) throws -> CompatibleTokenArray {
-        var reader = BinaryReader(data: try Data(contentsOf: fileURL))
+        var reader = BinaryReader(data: try Data(contentsOf: fileURL, options: [.mappedIfSafe]))
         let posCount = Int(try reader.readUInt32LE())
-        var posIndex: [UInt16] = []
-        for _ in 0..<posCount { posIndex.append(try reader.readUInt16LE()) }
+        let posIndex = try reader.readUInt16ArrayLE(count: posCount)
 
         let costCount = Int(try reader.readUInt32LE())
-        var wordCost: [Int16] = []
-        for _ in 0..<costCount { wordCost.append(try reader.readInt16LE()) }
+        let wordCost = try reader.readInt16ArrayLE(count: costCount)
 
         let nodeCount = Int(try reader.readUInt32LE())
-        var nodeIndex: [Int32] = []
-        for _ in 0..<nodeCount { nodeIndex.append(try reader.readInt32LE()) }
+        let nodeIndex = try reader.readInt32ArrayLE(count: nodeCount)
 
         return CompatibleTokenArray(
             posIndex: posIndex,
@@ -249,10 +234,8 @@ enum MozcArtifactIO {
     private static func readPosTable(_ fileURL: URL) throws -> CompatiblePosTable {
         var reader = BinaryReader(data: try Data(contentsOf: fileURL))
         let count = Int(try reader.readUInt32LE())
-        var left: [Int16] = []
-        var right: [Int16] = []
-        for _ in 0..<count { left.append(try reader.readInt16LE()) }
-        for _ in 0..<count { right.append(try reader.readInt16LE()) }
+        let left = try reader.readInt16ArrayLE(count: count)
+        let right = try reader.readInt16ArrayLE(count: count)
         return CompatiblePosTable(leftIds: left, rightIds: right)
     }
 
@@ -292,9 +275,7 @@ enum MozcArtifactIO {
     private static func readBitVector(reader: inout BinaryReader) throws -> CompatibleBitVector {
         let bitCount = try reader.readIntCount()
         let wordCount = try reader.readIntCount()
-        var words: [UInt64] = []
-        words.reserveCapacity(wordCount)
-        for _ in 0..<wordCount { words.append(try reader.readUInt64()) }
+        let words = try reader.readUInt64ArrayLE(count: wordCount)
         return CompatibleBitVector(bitCount: bitCount, words: words)
     }
 
