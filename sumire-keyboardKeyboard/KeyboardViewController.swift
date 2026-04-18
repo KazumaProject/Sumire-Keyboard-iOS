@@ -1,7 +1,7 @@
 import UIKit
 
 final class KeyboardViewController: UIInputViewController {
-    private enum FlickDirection: Equatable {
+    private enum FlickDirection: Hashable {
         case center
         case left
         case up
@@ -48,6 +48,120 @@ final class KeyboardViewController: UIInputViewController {
 
         required init?(coder: NSCoder) {
             return nil
+        }
+    }
+
+    private final class CandidateButton: UIButton {
+        var committedText: String?
+
+        init() {
+            super.init(frame: .zero)
+
+            var configuration = UIButton.Configuration.filled()
+            configuration.title = "候補"
+            configuration.baseBackgroundColor = .white
+            configuration.baseForegroundColor = .label
+            configuration.cornerStyle = .medium
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+            self.configuration = configuration
+            titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+            titleLabel?.adjustsFontSizeToFitWidth = true
+            titleLabel?.minimumScaleFactor = 0.72
+            titleLabel?.lineBreakMode = .byTruncatingTail
+            translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        func configure(title: String, committedText: String?, isEnabled: Bool) {
+            self.committedText = committedText
+            self.isEnabled = isEnabled
+            alpha = isEnabled ? 1 : 0.55
+
+            var newConfiguration = self.configuration
+            newConfiguration?.title = title
+            newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
+            self.configuration = newConfiguration
+        }
+    }
+
+    private final class FlickGuideView: UIView {
+        private let labelSize = CGSize(width: 44, height: 36)
+        private var labels: [FlickDirection: UILabel] = [:]
+        private(set) var showsAllDirections = false
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            backgroundColor = .clear
+            isUserInteractionEnabled = false
+
+            for direction in [FlickDirection.left, .up, .right, .down, .center] {
+                let label = UILabel()
+                label.textAlignment = .center
+                label.font = .systemFont(ofSize: 20, weight: .bold)
+                label.textColor = .white
+                label.backgroundColor = UIColor.black.withAlphaComponent(0.78)
+                label.layer.cornerRadius = 8
+                label.layer.masksToBounds = true
+                addSubview(label)
+                labels[direction] = label
+            }
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        func configure(candidates: [FlickDirection: String], selectedDirection: FlickDirection, showsAllDirections: Bool) {
+            self.showsAllDirections = showsAllDirections
+
+            for (direction, label) in labels {
+                label.text = candidates[direction]
+                let shouldShow = showsAllDirections || direction == .center || direction == selectedDirection
+                label.isHidden = candidates[direction] == nil || !shouldShow
+                label.backgroundColor = direction == selectedDirection
+                    ? UIColor.systemBlue.withAlphaComponent(0.9)
+                    : UIColor.black.withAlphaComponent(0.78)
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            labels[.center]?.frame = CGRect(
+                x: center.x - (labelSize.width / 2),
+                y: center.y - (labelSize.height / 2),
+                width: labelSize.width,
+                height: labelSize.height
+            )
+            labels[.left]?.frame = CGRect(
+                x: center.x - labelSize.width - 10,
+                y: center.y - (labelSize.height / 2),
+                width: labelSize.width,
+                height: labelSize.height
+            )
+            labels[.up]?.frame = CGRect(
+                x: center.x - (labelSize.width / 2),
+                y: center.y - labelSize.height - 10,
+                width: labelSize.width,
+                height: labelSize.height
+            )
+            labels[.right]?.frame = CGRect(
+                x: center.x + 10,
+                y: center.y - (labelSize.height / 2),
+                width: labelSize.width,
+                height: labelSize.height
+            )
+            labels[.down]?.frame = CGRect(
+                x: center.x - (labelSize.width / 2),
+                y: center.y + 10,
+                width: labelSize.width,
+                height: labelSize.height
+            )
         }
     }
 
@@ -106,42 +220,97 @@ final class KeyboardViewController: UIInputViewController {
     private var activeCandidateIndex = 0
     private var lastInsertedText = ""
     private var lastInputDate: Date?
+    private var composingText = ""
+    private var renderedComposingText = ""
+    private var kanaKanjiConverter: KanaKanjiConverter?
+    private var converterLoadFailureMessage: String?
+    private var isLoadingKanaKanjiConverter = false
+    private var candidateButtons: [CandidateButton] = []
+    private let candidateScrollView = UIScrollView()
+    private let candidateStack = UIStackView()
+    private let flickGuideView = FlickGuideView()
+    private let conversionCandidateLimit = 100
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
+    private var deleteRepeatTimer: Timer?
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
         view.backgroundColor = .systemGray5
         setupKeyboardLayout()
+        loadKanaKanjiConverter()
+        updatePreedit()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        stopDeleteRepeat()
+        commitRenderedComposingTextAsTyped()
     }
 
     private func setupKeyboardLayout() {
-        let rootStack = UIStackView()
-        rootStack.axis = .horizontal
-        rootStack.alignment = .fill
-        rootStack.distribution = .fill
-        rootStack.spacing = 6
-        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        let contentStack = UIStackView()
+        contentStack.axis = .vertical
+        contentStack.alignment = .fill
+        contentStack.distribution = .fill
+        contentStack.spacing = 6
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let candidateBar = makeCandidateBar()
+        let keyboardStack = UIStackView()
+        keyboardStack.axis = .horizontal
+        keyboardStack.alignment = .fill
+        keyboardStack.distribution = .fill
+        keyboardStack.spacing = 6
 
         let kanaGrid = makeKanaGrid()
         let controlColumn = makeControlColumn()
 
-        rootStack.addArrangedSubview(kanaGrid)
-        rootStack.addArrangedSubview(controlColumn)
-        view.addSubview(rootStack)
+        keyboardStack.addArrangedSubview(kanaGrid)
+        keyboardStack.addArrangedSubview(controlColumn)
+        contentStack.addArrangedSubview(candidateBar)
+        contentStack.addArrangedSubview(keyboardStack)
+        view.addSubview(contentStack)
+        view.addSubview(flickGuideView)
+        flickGuideView.isHidden = true
 
         NSLayoutConstraint.activate([
-            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 252),
+            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 292),
 
-            rootStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
-            rootStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
-            rootStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
-            rootStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+            contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+            contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
+            contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+            contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
 
+            candidateBar.heightAnchor.constraint(equalToConstant: 38),
             controlColumn.widthAnchor.constraint(equalTo: kanaGrid.widthAnchor, multiplier: 0.28)
         ])
+    }
+
+    private func makeCandidateBar() -> UIView {
+        candidateScrollView.showsHorizontalScrollIndicator = true
+        candidateScrollView.alwaysBounceHorizontal = true
+        candidateScrollView.backgroundColor = .clear
+        candidateScrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        candidateStack.axis = .horizontal
+        candidateStack.alignment = .fill
+        candidateStack.distribution = .fill
+        candidateStack.spacing = 6
+        candidateStack.translatesAutoresizingMaskIntoConstraints = false
+        candidateScrollView.addSubview(candidateStack)
+
+        NSLayoutConstraint.activate([
+            candidateStack.topAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.topAnchor),
+            candidateStack.leadingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.leadingAnchor),
+            candidateStack.trailingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.trailingAnchor),
+            candidateStack.bottomAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.bottomAnchor),
+            candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor)
+        ])
+
+        return candidateScrollView
     }
 
     private func makeKanaGrid() -> UIStackView {
@@ -161,7 +330,7 @@ final class KeyboardViewController: UIInputViewController {
             for key in row {
                 let action: KeyAction = key.candidates.isEmpty ? .transform : .kana(key)
                 let button = KeyboardButton(title: key.label, action: action, style: .kana)
-                button.addTarget(self, action: #selector(handleKeyRelease(_:event:)), for: [.touchUpInside, .touchUpOutside])
+                configureInputTargets(for: button)
                 rowStack.addArrangedSubview(button)
             }
 
@@ -175,7 +344,7 @@ final class KeyboardViewController: UIInputViewController {
         let column = UIStackView()
         column.axis = .vertical
         column.alignment = .fill
-        column.distribution = .fillEqually
+        column.distribution = .fill
         column.spacing = 6
 
         let controls: [(String, KeyAction, ButtonStyle)] = [
@@ -184,21 +353,89 @@ final class KeyboardViewController: UIInputViewController {
             ("Enter", .enter, .primary)
         ]
 
+        var buttons: [KeyboardButton] = []
         for control in controls {
             let button = KeyboardButton(title: control.0, action: control.1, style: control.2)
-            button.addTarget(self, action: #selector(handleKeyRelease(_:event:)), for: [.touchUpInside, .touchUpOutside])
-            if case .enter = control.1 {
-                button.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(handleEnterLongPress(_:))))
+            configureInputTargets(for: button)
+            if case .delete = control.1 {
+                let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
+                longPress.minimumPressDuration = 0.35
+                longPress.cancelsTouchesInView = false
+                button.addGestureRecognizer(longPress)
+            } else if case .enter = control.1 {
+                let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleEnterLongPress(_:)))
+                longPress.minimumPressDuration = 0.45
+                button.addGestureRecognizer(longPress)
             }
             column.addArrangedSubview(button)
+            buttons.append(button)
+        }
+
+        if buttons.count == 3 {
+            NSLayoutConstraint.activate([
+                buttons[1].heightAnchor.constraint(equalTo: buttons[0].heightAnchor),
+                buttons[2].heightAnchor.constraint(equalTo: buttons[0].heightAnchor, multiplier: 2)
+            ])
         }
 
         return column
     }
 
+    private func configureInputTargets(for button: KeyboardButton) {
+        button.addTarget(self, action: #selector(handleTouchDown(_:event:)), for: .touchDown)
+        button.addTarget(self, action: #selector(handleTouchDrag(_:event:)), for: [.touchDragInside, .touchDragOutside])
+        button.addTarget(self, action: #selector(handleKeyRelease(_:event:)), for: [.touchUpInside, .touchUpOutside])
+        button.addTarget(self, action: #selector(handleTouchCancel(_:)), for: .touchCancel)
+
+        if case .kana = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
+        }
+    }
+
+    @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
+        guard case .kana(let key) = sender.action else {
+            return
+        }
+
+        showFlickGuide(for: key, from: sender, selectedDirection: .center, showsAllDirections: false)
+    }
+
+    @objc private func handleTouchDrag(_ sender: KeyboardButton, event: UIEvent) {
+        guard case .kana(let key) = sender.action else {
+            return
+        }
+
+        let direction = flickDirection(for: sender, event: event)
+        showFlickGuide(
+            for: key,
+            from: sender,
+            selectedDirection: direction,
+            showsAllDirections: flickGuideView.showsAllDirections
+        )
+    }
+
+    @objc private func handleTouchCancel(_ sender: KeyboardButton) {
+        stopDeleteRepeat()
+        hideFlickGuide()
+    }
+
+    @objc private func handleKanaLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began,
+              let button = gesture.view as? KeyboardButton,
+              case .kana(let key) = button.action else {
+            return
+        }
+
+        showFlickGuide(for: key, from: button, selectedDirection: .center, showsAllDirections: true)
+    }
+
     @objc private func handleKeyRelease(_ sender: KeyboardButton, event: UIEvent) {
         if suppressNextButtonRelease {
             suppressNextButtonRelease = false
+            hideFlickGuide()
             return
         }
 
@@ -210,14 +447,33 @@ final class KeyboardViewController: UIInputViewController {
             transformPreviousCharacter()
         case .delete:
             resetMultiTapState()
-            textDocumentProxy.deleteBackward()
+            deleteBackward()
         case .space:
             resetMultiTapState()
-            textDocumentProxy.insertText(" ")
+            if composingText.isEmpty {
+                textDocumentProxy.insertText(" ")
+            } else {
+                commitDefaultCandidate()
+            }
         case .enter:
             resetMultiTapState()
-            textDocumentProxy.insertText("\n")
+            if composingText.isEmpty {
+                textDocumentProxy.insertText("\n")
+            } else {
+                commitDefaultCandidate()
+            }
         }
+
+        hideFlickGuide()
+    }
+
+    @objc private func commitCandidate(_ sender: CandidateButton) {
+        guard let text = sender.committedText else {
+            return
+        }
+
+        resetMultiTapState()
+        commitComposingText(text)
     }
 
     @objc private func handleEnterLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -227,7 +483,27 @@ final class KeyboardViewController: UIInputViewController {
 
         suppressNextButtonRelease = true
         resetMultiTapState()
+        hideFlickGuide()
+        commitRenderedComposingTextAsTyped()
         advanceToNextInputMode()
+    }
+
+    @objc private func handleDeleteLongPress(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            suppressNextButtonRelease = true
+            resetMultiTapState()
+            hideFlickGuide()
+            deleteBackward()
+            startDeleteRepeat()
+        case .ended, .cancelled, .failed:
+            stopDeleteRepeat()
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressNextButtonRelease = false
+            }
+        default:
+            break
+        }
     }
 
     private func flickDirection(for button: KeyboardButton, event: UIEvent) -> FlickDirection {
@@ -257,7 +533,7 @@ final class KeyboardViewController: UIInputViewController {
 
         if direction != .center, let text = flickCandidate(for: key, direction: direction) {
             resetMultiTapState()
-            textDocumentProxy.insertText(text)
+            setComposingText(composingText + text)
             return
         }
 
@@ -266,16 +542,20 @@ final class KeyboardViewController: UIInputViewController {
             && lastInsertedText.isEmpty == false
             && lastInputDate.map { now.timeIntervalSince($0) <= multiTapInterval } == true
 
+        var nextComposingText = composingText
         if shouldCycle {
             activeCandidateIndex = (activeCandidateIndex + 1) % key.candidates.count
-            textDocumentProxy.deleteBackward()
+            if nextComposingText.isEmpty == false {
+                nextComposingText.removeLast()
+            }
         } else {
             activeKeyLabel = key.label
             activeCandidateIndex = 0
         }
 
         let text = key.candidates[activeCandidateIndex]
-        textDocumentProxy.insertText(text)
+        nextComposingText.append(text)
+        setComposingText(nextComposingText)
         lastInsertedText = text
         lastInputDate = now
     }
@@ -341,16 +621,274 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func transformPreviousCharacter() {
-        resetMultiTapState()
+    private func showFlickGuide(
+        for key: KanaKey,
+        from button: KeyboardButton,
+        selectedDirection: FlickDirection,
+        showsAllDirections: Bool
+    ) {
+        let buttonFrame = button.convert(button.bounds, to: view)
+        let guideSize = CGSize(width: 150, height: 150)
+        let rawOrigin = CGPoint(
+            x: buttonFrame.midX - (guideSize.width / 2),
+            y: buttonFrame.midY - (guideSize.height / 2)
+        )
+        let origin = CGPoint(
+            x: min(max(rawOrigin.x, 4), max(view.bounds.width - guideSize.width - 4, 4)),
+            y: min(max(rawOrigin.y, 4), max(view.bounds.height - guideSize.height - 4, 4))
+        )
 
-        guard let previousCharacter = textDocumentProxy.documentContextBeforeInput?.last,
-              let transformedCharacter = transformedCharacter(after: previousCharacter) else {
+        flickGuideView.frame = CGRect(origin: origin, size: guideSize)
+        flickGuideView.configure(
+            candidates: flickGuideCandidates(for: key),
+            selectedDirection: selectedDirection,
+            showsAllDirections: showsAllDirections
+        )
+        flickGuideView.isHidden = false
+        view.bringSubviewToFront(flickGuideView)
+    }
+
+    private func hideFlickGuide() {
+        flickGuideView.isHidden = true
+    }
+
+    private func flickGuideCandidates(for key: KanaKey) -> [FlickDirection: String] {
+        var candidates: [FlickDirection: String] = [:]
+        for direction in [FlickDirection.center, .left, .up, .right, .down] {
+            candidates[direction] = flickCandidate(for: key, direction: direction)
+        }
+        return candidates
+    }
+
+    private func updatePreedit() {
+        let candidates = currentCandidateTexts()
+
+        candidateButtons.removeAll()
+        for view in candidateStack.arrangedSubviews {
+            candidateStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        guard candidates.isEmpty == false else {
+            addCandidateButton(title: "候補", committedText: nil, isEnabled: false)
             return
         }
 
-        textDocumentProxy.deleteBackward()
-        textDocumentProxy.insertText(String(transformedCharacter))
+        for candidate in candidates {
+            addCandidateButton(title: candidate, committedText: candidate, isEnabled: true)
+        }
+        candidateScrollView.setContentOffset(.zero, animated: false)
+    }
+
+    private func addCandidateButton(title: String, committedText: String?, isEnabled: Bool) {
+        let button = CandidateButton()
+        button.configure(title: title, committedText: committedText, isEnabled: isEnabled)
+        button.addTarget(self, action: #selector(commitCandidate(_:)), for: .touchUpInside)
+        candidateStack.addArrangedSubview(button)
+        candidateButtons.append(button)
+
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
+        ])
+    }
+
+    private func commitDefaultCandidate() {
+        guard composingText.isEmpty == false else {
+            return
+        }
+
+        commitComposingText(currentCandidateTexts().first ?? composingText)
+    }
+
+    private func commitComposingText(_ text: String) {
+        guard composingText.isEmpty == false else {
+            return
+        }
+
+        replaceRenderedComposingText(with: text)
+        composingText = ""
+        renderedComposingText = ""
+        updatePreedit()
+    }
+
+    private func commitRenderedComposingTextAsTyped() {
+        guard composingText.isEmpty == false else {
+            return
+        }
+
+        composingText = ""
+        renderedComposingText = ""
+        updatePreedit()
+    }
+
+    private func setComposingText(_ text: String) {
+        replaceRenderedComposingText(with: text)
+        composingText = text
+        updatePreedit()
+    }
+
+    private func replaceRenderedComposingText(with text: String) {
+        deleteRenderedComposingText()
+        if text.isEmpty == false {
+            textDocumentProxy.insertText(text)
+        }
+        renderedComposingText = text
+    }
+
+    private func deleteRenderedComposingText() {
+        guard renderedComposingText.isEmpty == false else {
+            return
+        }
+
+        for _ in renderedComposingText {
+            textDocumentProxy.deleteBackward()
+        }
+        renderedComposingText = ""
+    }
+
+    private func deleteBackward() {
+        guard composingText.isEmpty == false else {
+            textDocumentProxy.deleteBackward()
+            return
+        }
+
+        var nextText = composingText
+        nextText.removeLast()
+        setComposingText(nextText)
+    }
+
+    private func startDeleteRepeat() {
+        stopDeleteRepeat()
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            self?.deleteBackward()
+        }
+        deleteRepeatTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopDeleteRepeat() {
+        deleteRepeatTimer?.invalidate()
+        deleteRepeatTimer = nil
+    }
+
+    private func currentCandidateTexts() -> [String] {
+        guard composingText.isEmpty == false else {
+            return []
+        }
+
+        var seen = Set<String>()
+        var candidates: [String] = []
+
+        func appendUnique(_ text: String) {
+            guard text.isEmpty == false, seen.insert(text).inserted else {
+                return
+            }
+            candidates.append(text)
+        }
+
+        if let kanaKanjiConverter {
+            let options = ConversionOptions(limit: conversionCandidateLimit, beamWidth: 50)
+            for candidate in kanaKanjiConverter.convert(composingText, options: options) {
+                appendUnique(candidate.text)
+            }
+        }
+
+        appendUnique(composingText)
+        appendUnique(katakanaText(from: composingText))
+        appendUnique(halfWidthKatakanaText(from: composingText))
+
+        return candidates
+    }
+
+    private func loadKanaKanjiConverter() {
+        guard kanaKanjiConverter == nil, isLoadingKanaKanjiConverter == false else {
+            return
+        }
+
+        guard let artifactsDirectory = kanaKanjiArtifactsDirectory() else {
+            converterLoadFailureMessage = "KanaKanji resources were not found in the keyboard bundle."
+            return
+        }
+
+        isLoadingKanaKanjiConverter = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result: Result<KanaKanjiConverter, Error>
+
+            do {
+                let dictionary = try MozcDictionary(artifactsDirectory: artifactsDirectory)
+                let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(
+                    artifactsDirectory.appendingPathComponent("connection_single_column.bin")
+                )
+                result = .success(KanaKanjiConverter(
+                    dictionary: dictionary,
+                    connectionMatrix: connectionMatrix
+                ))
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+
+                self.isLoadingKanaKanjiConverter = false
+                switch result {
+                case .success(let converter):
+                    self.kanaKanjiConverter = converter
+                    self.converterLoadFailureMessage = nil
+                case .failure(let error):
+                    self.kanaKanjiConverter = nil
+                    self.converterLoadFailureMessage = error.localizedDescription
+                }
+                self.updatePreedit()
+            }
+        }
+    }
+
+    private func kanaKanjiArtifactsDirectory() -> URL? {
+        let fileManager = FileManager.default
+        var candidateDirectories: [URL] = []
+
+        if let bundledDirectory = Bundle.main.url(forResource: "KanaKanjiResources", withExtension: nil) {
+            candidateDirectories.append(bundledDirectory)
+        }
+
+        if let resourceDirectory = Bundle.main.resourceURL {
+            candidateDirectories.append(resourceDirectory.appendingPathComponent("KanaKanjiResources", isDirectory: true))
+            candidateDirectories.append(resourceDirectory)
+        }
+
+        return candidateDirectories.first { directory in
+            MozcDictionary.artifactFileNames.allSatisfy { fileName in
+                fileManager.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+            }
+        }
+    }
+
+    private func katakanaText(from text: String) -> String {
+        text.applyingTransform(.hiraganaToKatakana, reverse: false) ?? text
+    }
+
+    private func halfWidthKatakanaText(from text: String) -> String {
+        let katakana = katakanaText(from: text)
+        return katakana.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? katakana
+    }
+
+    private func transformPreviousCharacter() {
+        resetMultiTapState()
+
+        if let previousCharacter = composingText.last,
+           let transformedCharacter = transformedCharacter(after: previousCharacter) {
+            var nextText = composingText
+            nextText.removeLast()
+            nextText.append(transformedCharacter)
+            setComposingText(nextText)
+        } else if let previousCharacter = textDocumentProxy.documentContextBeforeInput?.last,
+                  let transformedCharacter = transformedCharacter(after: previousCharacter) {
+            textDocumentProxy.deleteBackward()
+            textDocumentProxy.insertText(String(transformedCharacter))
+        }
     }
 
     private func transformedCharacter(after character: Character) -> Character? {
