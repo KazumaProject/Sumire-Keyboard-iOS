@@ -18,6 +18,8 @@ final class KeyboardViewController: UIInputViewController {
         case kana(KanaKey)
         case transform
         case delete
+        case moveLeft
+        case moveRight
         case space
         case enter
     }
@@ -222,6 +224,8 @@ final class KeyboardViewController: UIInputViewController {
     private var lastInputDate: Date?
     private var composingText = ""
     private var renderedComposingText = ""
+    private var conversionRange: Range<Int> = 0..<0
+    private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
@@ -229,7 +233,8 @@ final class KeyboardViewController: UIInputViewController {
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
     private let flickGuideView = FlickGuideView()
-    private let conversionCandidateLimit = 100
+    private let conversionCandidateLimit = 40
+    private let conversionBeamWidth = 20
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
@@ -347,29 +352,47 @@ final class KeyboardViewController: UIInputViewController {
         column.distribution = .fill
         column.spacing = 6
 
-        let controls: [(String, KeyAction, ButtonStyle)] = [
-            ("⌫", .delete, .function),
-            ("空白", .space, .function),
-            ("Enter", .enter, .primary)
-        ]
-
         var buttons: [KeyboardButton] = []
-        for control in controls {
-            let button = KeyboardButton(title: control.0, action: control.1, style: control.2)
-            configureInputTargets(for: button)
-            if case .delete = control.1 {
-                let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
-                longPress.minimumPressDuration = 0.35
-                longPress.cancelsTouchesInView = false
-                button.addGestureRecognizer(longPress)
-            } else if case .enter = control.1 {
-                let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleEnterLongPress(_:)))
-                longPress.minimumPressDuration = 0.45
-                button.addGestureRecognizer(longPress)
-            }
-            column.addArrangedSubview(button)
-            buttons.append(button)
-        }
+
+        let deleteButton = KeyboardButton(title: "⌫", action: .delete, style: .function)
+        configureInputTargets(for: deleteButton)
+        let deleteLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
+        deleteLongPress.minimumPressDuration = 0.35
+        deleteLongPress.cancelsTouchesInView = false
+        deleteButton.addGestureRecognizer(deleteLongPress)
+        column.addArrangedSubview(deleteButton)
+        buttons.append(deleteButton)
+
+        let arrowRow = UIStackView()
+        arrowRow.axis = .horizontal
+        arrowRow.alignment = .fill
+        arrowRow.distribution = .fillEqually
+        arrowRow.spacing = 6
+
+        let leftButton = KeyboardButton(title: "←", action: .moveLeft, style: .function)
+        let rightButton = KeyboardButton(title: "→", action: .moveRight, style: .function)
+        configureInputTargets(for: leftButton)
+        configureInputTargets(for: rightButton)
+        arrowRow.addArrangedSubview(leftButton)
+        arrowRow.addArrangedSubview(rightButton)
+        column.addArrangedSubview(arrowRow)
+
+        let spaceButton = KeyboardButton(title: "空白", action: .space, style: .function)
+        configureInputTargets(for: spaceButton)
+        column.addArrangedSubview(spaceButton)
+        buttons.append(spaceButton)
+
+        let enterButton = KeyboardButton(title: "Enter", action: .enter, style: .primary)
+        configureInputTargets(for: enterButton)
+        let enterLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleEnterLongPress(_:)))
+        enterLongPress.minimumPressDuration = 0.45
+        enterButton.addGestureRecognizer(enterLongPress)
+        column.addArrangedSubview(enterButton)
+        buttons.append(enterButton)
+
+        NSLayoutConstraint.activate([
+            arrowRow.heightAnchor.constraint(equalTo: deleteButton.heightAnchor)
+        ])
 
         if buttons.count == 3 {
             NSLayoutConstraint.activate([
@@ -448,6 +471,12 @@ final class KeyboardViewController: UIInputViewController {
         case .delete:
             resetMultiTapState()
             deleteBackward()
+        case .moveLeft:
+            resetMultiTapState()
+            moveLeftKey()
+        case .moveRight:
+            resetMultiTapState()
+            moveRightKey()
         case .space:
             resetMultiTapState()
             if composingText.isEmpty {
@@ -661,6 +690,8 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func updatePreedit() {
+        normalizeCompositionRanges()
+
         let candidates = currentCandidateTexts()
 
         candidateButtons.removeAll()
@@ -697,7 +728,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        commitComposingText(currentCandidateTexts().first ?? composingText)
+        commitComposingText(currentCandidateTexts().first ?? conversionTargetText())
     }
 
     private func commitComposingText(_ text: String) {
@@ -705,9 +736,29 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        replaceRenderedComposingText(with: text)
-        composingText = ""
-        renderedComposingText = ""
+        let activeRange = normalizedConversionRange()
+        let remainingUnderlineRange = underlineRange
+        let updatedText = replacingText(in: activeRange, with: text)
+
+        replaceRenderedComposingText(with: updatedText)
+
+        if let remainingUnderlineRange,
+           let nextRange = adjustedRangeAfterReplacement(
+                remainingUnderlineRange,
+                replacedRange: activeRange,
+                replacementCharacterCount: text.count,
+                updatedTextCount: updatedText.count
+           ) {
+            composingText = updatedText
+            renderedComposingText = updatedText
+            conversionRange = nextRange
+            underlineRange = nil
+        } else {
+            composingText = ""
+            renderedComposingText = ""
+            conversionRange = 0..<0
+            underlineRange = nil
+        }
         updatePreedit()
     }
 
@@ -718,20 +769,38 @@ final class KeyboardViewController: UIInputViewController {
 
         composingText = ""
         renderedComposingText = ""
+        conversionRange = 0..<0
+        underlineRange = nil
         updatePreedit()
     }
 
-    private func setComposingText(_ text: String) {
+    private func setComposingText(_ text: String, resetsConversionRange: Bool = true) {
         replaceRenderedComposingText(with: text)
         composingText = text
+        if resetsConversionRange {
+            conversionRange = text.isEmpty ? 0..<0 : 0..<text.count
+        }
+        updateUnderlineRange()
         updatePreedit()
     }
 
     private func replaceRenderedComposingText(with text: String) {
-        deleteRenderedComposingText()
-        if text.isEmpty == false {
-            textDocumentProxy.insertText(text)
+        guard renderedComposingText != text else {
+            return
         }
+
+        let sharedPrefixCount = commonPrefixCount(renderedComposingText, text)
+        let deleteCount = renderedComposingText.count - sharedPrefixCount
+
+        for _ in 0..<deleteCount {
+            textDocumentProxy.deleteBackward()
+        }
+
+        if sharedPrefixCount < text.count {
+            let startIndex = stringIndex(in: text, offset: sharedPrefixCount)
+            textDocumentProxy.insertText(String(text[startIndex...]))
+        }
+
         renderedComposingText = text
     }
 
@@ -754,7 +823,39 @@ final class KeyboardViewController: UIInputViewController {
 
         var nextText = composingText
         nextText.removeLast()
-        setComposingText(nextText)
+        setComposingText(nextText, resetsConversionRange: false)
+    }
+
+    private func moveLeftKey() {
+        guard composingText.isEmpty == false else {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
+            return
+        }
+
+        moveConversionUpperBound(by: -1)
+    }
+
+    private func moveRightKey() {
+        guard composingText.isEmpty == false else {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
+            return
+        }
+
+        moveConversionUpperBound(by: 1)
+    }
+
+    private func moveConversionUpperBound(by offset: Int) {
+        let count = composingText.count
+        guard count > 0 else {
+            return
+        }
+
+        let range = normalizedConversionRange()
+        let lowerBound = range.lowerBound
+        let upperBound = min(max(range.upperBound + offset, lowerBound + 1), count)
+        conversionRange = lowerBound..<upperBound
+        updateUnderlineRange()
+        updatePreedit()
     }
 
     private func startDeleteRepeat() {
@@ -776,6 +877,11 @@ final class KeyboardViewController: UIInputViewController {
             return []
         }
 
+        let targetText = conversionTargetText()
+        guard targetText.isEmpty == false else {
+            return []
+        }
+
         var seen = Set<String>()
         var candidates: [String] = []
 
@@ -787,17 +893,118 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         if let kanaKanjiConverter {
-            let options = ConversionOptions(limit: conversionCandidateLimit, beamWidth: 50)
-            for candidate in kanaKanjiConverter.convert(composingText, options: options) {
+            let options = ConversionOptions(limit: conversionCandidateLimit, beamWidth: conversionBeamWidth)
+            for candidate in kanaKanjiConverter.convert(targetText, options: options) {
                 appendUnique(candidate.text)
             }
         }
 
-        appendUnique(composingText)
-        appendUnique(katakanaText(from: composingText))
-        appendUnique(halfWidthKatakanaText(from: composingText))
+        appendUnique(targetText)
+        appendUnique(katakanaText(from: targetText))
+        appendUnique(halfWidthKatakanaText(from: targetText))
 
         return candidates
+    }
+
+    private func conversionTargetText() -> String {
+        text(in: normalizedConversionRange(), from: composingText)
+    }
+
+    private func updateUnderlineRange() {
+        guard composingText.isEmpty == false else {
+            underlineRange = nil
+            conversionRange = 0..<0
+            return
+        }
+
+        let activeRange = normalizedConversionRange()
+        conversionRange = activeRange
+        underlineRange = activeRange.upperBound < composingText.count
+            ? activeRange.upperBound..<composingText.count
+            : nil
+    }
+
+    private func normalizeCompositionRanges() {
+        guard composingText.isEmpty == false else {
+            conversionRange = 0..<0
+            underlineRange = nil
+            return
+        }
+
+        conversionRange = normalizedConversionRange()
+        if let underlineRange {
+            let lowerBound = min(max(underlineRange.lowerBound, 0), composingText.count)
+            let upperBound = min(max(underlineRange.upperBound, lowerBound), composingText.count)
+            self.underlineRange = lowerBound < upperBound ? lowerBound..<upperBound : nil
+        }
+    }
+
+    private func normalizedConversionRange() -> Range<Int> {
+        let count = composingText.count
+        guard count > 0 else {
+            return 0..<0
+        }
+
+        let lowerBound = min(max(conversionRange.lowerBound, 0), count - 1)
+        let upperBound = min(max(conversionRange.upperBound, lowerBound + 1), count)
+        return lowerBound..<upperBound
+    }
+
+    private func replacingText(in range: Range<Int>, with replacement: String) -> String {
+        let lowerIndex = stringIndex(in: composingText, offset: range.lowerBound)
+        let upperIndex = stringIndex(in: composingText, offset: range.upperBound)
+        var updatedText = composingText
+        updatedText.replaceSubrange(lowerIndex..<upperIndex, with: replacement)
+        return updatedText
+    }
+
+    private func adjustedRangeAfterReplacement(
+        _ range: Range<Int>,
+        replacedRange: Range<Int>,
+        replacementCharacterCount: Int,
+        updatedTextCount: Int
+    ) -> Range<Int>? {
+        let replacedCharacterCount = replacedRange.upperBound - replacedRange.lowerBound
+        let delta = replacementCharacterCount - replacedCharacterCount
+
+        let adjustedRange: Range<Int>
+        if range.lowerBound >= replacedRange.upperBound {
+            adjustedRange = (range.lowerBound + delta)..<(range.upperBound + delta)
+        } else if range.upperBound <= replacedRange.lowerBound {
+            adjustedRange = range
+        } else {
+            return nil
+        }
+
+        let lowerBound = min(max(adjustedRange.lowerBound, 0), updatedTextCount)
+        let upperBound = min(max(adjustedRange.upperBound, lowerBound), updatedTextCount)
+        return lowerBound < upperBound ? lowerBound..<upperBound : nil
+    }
+
+    private func text(in range: Range<Int>, from text: String) -> String {
+        let lowerIndex = stringIndex(in: text, offset: range.lowerBound)
+        let upperIndex = stringIndex(in: text, offset: range.upperBound)
+        return String(text[lowerIndex..<upperIndex])
+    }
+
+    private func stringIndex(in text: String, offset: Int) -> String.Index {
+        text.index(text.startIndex, offsetBy: min(max(offset, 0), text.count))
+    }
+
+    private func commonPrefixCount(_ lhs: String, _ rhs: String) -> Int {
+        var lhsIndex = lhs.startIndex
+        var rhsIndex = rhs.startIndex
+        var count = 0
+
+        while lhsIndex < lhs.endIndex,
+              rhsIndex < rhs.endIndex,
+              lhs[lhsIndex] == rhs[rhsIndex] {
+            count += 1
+            lhs.formIndex(after: &lhsIndex)
+            rhs.formIndex(after: &rhsIndex)
+        }
+
+        return count
     }
 
     private func loadKanaKanjiConverter() {
@@ -883,7 +1090,7 @@ final class KeyboardViewController: UIInputViewController {
             var nextText = composingText
             nextText.removeLast()
             nextText.append(transformedCharacter)
-            setComposingText(nextText)
+            setComposingText(nextText, resetsConversionRange: false)
         } else if let previousCharacter = textDocumentProxy.documentContextBeforeInput?.last,
                   let transformedCharacter = transformedCharacter(after: previousCharacter) {
             textDocumentProxy.deleteBackward()
