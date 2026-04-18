@@ -1,6 +1,56 @@
 import UIKit
 
 final class KeyboardViewController: UIInputViewController {
+    private enum KeyboardTheme {
+        static let keyboardBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.10, green: 0.10, blue: 0.11, alpha: 1)
+                : .systemGray5
+        }
+
+        static let keyBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.25, green: 0.25, blue: 0.27, alpha: 1)
+                : .white
+        }
+
+        static let keyHighlightedBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.36, green: 0.36, blue: 0.38, alpha: 1)
+                : .systemGray3
+        }
+
+        static let functionKeyBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.18, green: 0.19, blue: 0.21, alpha: 1)
+                : .systemGray3
+        }
+
+        static let functionKeyHighlightedBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.30, green: 0.31, blue: 0.34, alpha: 1)
+                : .systemGray2
+        }
+
+        static let candidateBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.20, green: 0.20, blue: 0.22, alpha: 1)
+                : .white
+        }
+
+        static let popupBackground = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(red: 0.26, green: 0.26, blue: 0.28, alpha: 1)
+                : .white
+        }
+
+        static let popupStroke = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.18)
+                : UIColor.separator.withAlphaComponent(0.18)
+        }
+    }
+
     private enum FlickDirection: Hashable {
         case center
         case left
@@ -64,6 +114,11 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
 
+        override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+            super.traitCollectionDidChange(previousTraitCollection)
+            updateBackgroundForCurrentState()
+        }
+
         required init?(coder: NSCoder) {
             return nil
         }
@@ -85,7 +140,7 @@ final class KeyboardViewController: UIInputViewController {
 
             var configuration = UIButton.Configuration.filled()
             configuration.title = "候補"
-            configuration.baseBackgroundColor = .white
+            configuration.baseBackgroundColor = KeyboardTheme.candidateBackground
             configuration.baseForegroundColor = .label
             configuration.cornerStyle = .medium
             configuration.titleLineBreakMode = .byTruncatingTail
@@ -98,11 +153,19 @@ final class KeyboardViewController: UIInputViewController {
             titleLabel?.lineBreakMode = .byTruncatingTail
             setContentHuggingPriority(.required, for: .horizontal)
             setContentCompressionResistancePriority(.required, for: .horizontal)
+            layer.cornerRadius = 8
+            layer.borderWidth = 0.5
+            layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
             translatesAutoresizingMaskIntoConstraints = false
         }
 
         required init?(coder: NSCoder) {
             return nil
+        }
+
+        override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+            super.traitCollectionDidChange(previousTraitCollection)
+            updateColorsForCurrentTraits()
         }
 
         func configure(title: String, committedText: String?, isEnabled: Bool) {
@@ -112,11 +175,24 @@ final class KeyboardViewController: UIInputViewController {
 
             var newConfiguration = self.configuration
             newConfiguration?.title = title
+            newConfiguration?.baseBackgroundColor = KeyboardTheme.candidateBackground
             newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
             newConfiguration?.titleLineBreakMode = .byTruncatingTail
             self.configuration = newConfiguration
             titleLabel?.numberOfLines = 1
             titleLabel?.lineBreakMode = .byTruncatingTail
+            updateColorsForCurrentTraits()
+        }
+
+        private func updateColorsForCurrentTraits() {
+            var newConfiguration = self.configuration
+            newConfiguration?.baseBackgroundColor = KeyboardTheme.candidateBackground
+            newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
+            self.configuration = newConfiguration
+            layer.borderColor = UIColor.separator
+                .withAlphaComponent(traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.16)
+                .resolvedColor(with: traitCollection)
+                .cgColor
         }
     }
 
@@ -165,11 +241,16 @@ final class KeyboardViewController: UIInputViewController {
                 label.text = text
                 isHidden = text == nil
 
-                fillColor = usesFlickShape || isSelected == false ? .white : .systemBlue
-                strokeColor = usesFlickShape ? .clear : UIColor.separator.withAlphaComponent(0.18)
+                fillColor = usesFlickShape || isSelected == false ? KeyboardTheme.popupBackground : .systemBlue
+                strokeColor = usesFlickShape ? .clear : KeyboardTheme.popupStroke
                 label.textColor = usesFlickShape
                     ? .label
                     : (isSelected ? .white : (isDimmed ? .secondaryLabel : .label))
+                setNeedsLayout()
+            }
+
+            override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+                super.traitCollectionDidChange(previousTraitCollection)
                 setNeedsLayout()
             }
 
@@ -178,8 +259,8 @@ final class KeyboardViewController: UIInputViewController {
 
                 shapeLayer.frame = bounds
                 shapeLayer.path = makePath(in: bounds).cgPath
-                shapeLayer.fillColor = fillColor.cgColor
-                shapeLayer.strokeColor = strokeColor.cgColor
+                shapeLayer.fillColor = fillColor.resolvedColor(with: traitCollection).cgColor
+                shapeLayer.strokeColor = strokeColor.resolvedColor(with: traitCollection).cgColor
                 shapeLayer.lineWidth = 0.5
 
                 label.frame = labelFrame.insetBy(dx: 4, dy: 2)
@@ -217,24 +298,12 @@ final class KeyboardViewController: UIInputViewController {
 
             private func makeRightTailPath(bodyRect: CGRect, tipX: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
                 let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
-                let baseTop = bodyRect.minY + radius
-                let baseBottom = bodyRect.maxY - radius
                 let path = UIBezierPath()
 
                 path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
-                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
-                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
-                )
-                path.addLine(to: CGPoint(x: bodyRect.maxX, y: baseTop))
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY))
                 path.addLine(to: CGPoint(x: tipX, y: bodyRect.midY))
-                path.addLine(to: CGPoint(x: bodyRect.maxX, y: baseBottom))
-                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
-                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
-                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY))
                 path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
                 path.addQuadCurve(
                     to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
@@ -251,11 +320,9 @@ final class KeyboardViewController: UIInputViewController {
 
             private func makeLeftTailPath(bodyRect: CGRect, tipX: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
                 let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
-                let baseTop = bodyRect.minY + radius
-                let baseBottom = bodyRect.maxY - radius
                 let path = UIBezierPath()
 
-                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
+                path.move(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY))
                 path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
                 path.addQuadCurve(
                     to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
@@ -266,19 +333,9 @@ final class KeyboardViewController: UIInputViewController {
                     to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
                     controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
                 )
-                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
-                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
-                )
-                path.addLine(to: CGPoint(x: bodyRect.minX, y: baseBottom))
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY))
                 path.addLine(to: CGPoint(x: tipX, y: bodyRect.midY))
-                path.addLine(to: CGPoint(x: bodyRect.minX, y: baseTop))
-                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
-                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
-                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY))
                 path.close()
                 return path
             }
@@ -493,16 +550,16 @@ final class KeyboardViewController: UIInputViewController {
         let shadowOpacity: Float
 
         static let kana = ButtonStyle(
-            backgroundColor: .white,
-            highlightedBackgroundColor: .systemGray3,
+            backgroundColor: KeyboardTheme.keyBackground,
+            highlightedBackgroundColor: KeyboardTheme.keyHighlightedBackground,
             foregroundColor: .label,
             font: .systemFont(ofSize: 24, weight: .semibold),
             shadowOpacity: 0.16
         )
 
         static let function = ButtonStyle(
-            backgroundColor: .systemGray3,
-            highlightedBackgroundColor: .systemGray2,
+            backgroundColor: KeyboardTheme.functionKeyBackground,
+            highlightedBackgroundColor: KeyboardTheme.functionKeyHighlightedBackground,
             foregroundColor: .label,
             font: .systemFont(ofSize: 17, weight: .semibold),
             shadowOpacity: 0.1
@@ -561,6 +618,7 @@ final class KeyboardViewController: UIInputViewController {
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
     private weak var activeKanaButton: KeyboardButton?
+    private var activeFlickDirection: FlickDirection = .center
     private var deleteRepeatTimer: Timer?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
@@ -569,10 +627,17 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        view.backgroundColor = .systemGray5
+        view.backgroundColor = KeyboardTheme.keyboardBackground
         view.clipsToBounds = false
         setupKeyboardLayout()
         updatePreedit()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        view.backgroundColor = KeyboardTheme.keyboardBackground
+        flickGuideView.setNeedsLayout()
+        candidateButtons.forEach { $0.setNeedsLayout() }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -769,6 +834,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         activeKanaButton = sender
+        activeFlickDirection = .center
         sender.isHighlighted = true
         hideFlickGuide()
     }
@@ -782,10 +848,12 @@ final class KeyboardViewController: UIInputViewController {
         sender.isHighlighted = true
         let direction = flickDirection(for: sender, event: event)
         if direction == .center, flickGuideView.showsAllDirections == false {
+            activeFlickDirection = .center
             hideFlickGuide()
             return
         }
 
+        activeFlickDirection = direction
         showFlickGuide(
             for: key,
             from: sender,
@@ -797,6 +865,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func handleTouchCancel(_ sender: KeyboardButton) {
         stopDeleteRepeat()
         clearActiveKanaButton()
+        activeFlickDirection = .center
         hideFlickGuide()
     }
 
@@ -808,6 +877,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         activeKanaButton = button
+        activeFlickDirection = .center
         button.isHighlighted = true
         showFlickGuide(for: key, from: button, selectedDirection: .center, mode: .longPress)
     }
@@ -816,14 +886,14 @@ final class KeyboardViewController: UIInputViewController {
         if suppressNextButtonRelease {
             suppressNextButtonRelease = false
             clearActiveKanaButton()
+            activeFlickDirection = .center
             hideFlickGuide()
             return
         }
 
-        let direction = flickDirection(for: sender, event: event)
         switch sender.action {
         case .kana(let key):
-            insertCandidate(for: key, direction: direction)
+            insertCandidate(for: key, direction: activeFlickDirection)
         case .transform:
             transformPreviousCharacter()
         case .delete:
@@ -852,6 +922,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         clearActiveKanaButton()
+        activeFlickDirection = .center
         hideFlickGuide()
     }
 
@@ -895,7 +966,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func flickDirection(for button: KeyboardButton, event: UIEvent) -> FlickDirection {
-        guard let touch = event.allTouches?.first else {
+        guard let touch = event.touches(for: button)?.first ?? event.allTouches?.first else {
             return .center
         }
 
