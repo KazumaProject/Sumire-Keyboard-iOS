@@ -246,20 +246,39 @@ final class KeyboardViewController: UIInputViewController {
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
     private var deleteRepeatTimer: Timer?
+    private var scheduledKanaKanjiLoad: DispatchWorkItem?
+    private var kanaKanjiLoadGeneration = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
 
         view.backgroundColor = .systemGray5
         setupKeyboardLayout()
-        loadKanaKanjiConverter()
         updatePreedit()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        scheduleKanaKanjiConverterLoad()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        scheduledKanaKanjiLoad?.cancel()
+        scheduledKanaKanjiLoad = nil
         stopDeleteRepeat()
         commitRenderedComposingTextAsTyped()
+    }
+
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        scheduledKanaKanjiLoad?.cancel()
+        scheduledKanaKanjiLoad = nil
+        kanaKanjiLoadGeneration += 1
+        isLoadingKanaKanjiConverter = false
+        kanaKanjiConverter = nil
+        converterLoadFailureMessage = nil
+        updatePreedit()
     }
 
     private func setupKeyboardLayout() {
@@ -1014,6 +1033,25 @@ final class KeyboardViewController: UIInputViewController {
         return count
     }
 
+    private func scheduleKanaKanjiConverterLoad() {
+        guard kanaKanjiConverter == nil,
+              isLoadingKanaKanjiConverter == false,
+              scheduledKanaKanjiLoad == nil else {
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else {
+                return
+            }
+
+            self.scheduledKanaKanjiLoad = nil
+            self.loadKanaKanjiConverter()
+        }
+        scheduledKanaKanjiLoad = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: workItem)
+    }
+
     private func loadKanaKanjiConverter() {
         guard kanaKanjiConverter == nil, isLoadingKanaKanjiConverter == false else {
             return
@@ -1025,6 +1063,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         isLoadingKanaKanjiConverter = true
+        let loadGeneration = kanaKanjiLoadGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result: Result<KanaKanjiConverter, Error>
 
@@ -1042,7 +1081,7 @@ final class KeyboardViewController: UIInputViewController {
             }
 
             DispatchQueue.main.async {
-                guard let self else {
+                guard let self, loadGeneration == self.kanaKanjiLoadGeneration else {
                     return
                 }
 

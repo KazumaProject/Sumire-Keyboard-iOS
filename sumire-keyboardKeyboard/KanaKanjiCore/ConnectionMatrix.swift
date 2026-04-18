@@ -1,13 +1,18 @@
 import Foundation
 
 public struct ConnectionMatrix: Sendable {
+    private enum Storage: Sendable {
+        case costs([Int])
+        case bigEndianInt16Data(Data)
+    }
+
     private let dimension: Int
-    private let costs: [Int]
+    private let storage: Storage
 
     public init(costs: [Int]) throws {
         guard !costs.isEmpty else {
             self.dimension = 0
-            self.costs = []
+            self.storage = .costs([])
             return
         }
 
@@ -17,7 +22,12 @@ public struct ConnectionMatrix: Sendable {
         }
 
         self.dimension = root
-        self.costs = costs
+        self.storage = .costs(costs)
+    }
+
+    private init(bigEndianInt16Data data: Data, dimension: Int) {
+        self.dimension = dimension
+        self.storage = .bigEndianInt16Data(data)
     }
 
     public static func loadText(
@@ -65,32 +75,19 @@ public struct ConnectionMatrix: Sendable {
             throw KanaKanjiError.dictionaryNotFound(fileURL)
         }
 
-        let data = try Data(contentsOf: fileURL)
-        var values: [Int] = []
-        values.reserveCapacity(data.count / 2)
+        let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+        let valueCount = data.count / 2
 
-        var index = data.startIndex
-        while index < data.endIndex {
-            let next = data.index(after: index)
-            guard next < data.endIndex else {
-                break
-            }
-
-            let raw = UInt16(data[index]) << 8 | UInt16(data[next])
-            values.append(Int(Int16(bitPattern: raw)))
-            index = data.index(after: next)
-        }
-
-        guard !values.isEmpty else {
+        guard valueCount > 0 else {
             throw KanaKanjiError.connectionMatrixIsEmpty(fileURL)
         }
 
-        let root = Int(Double(values.count).squareRoot().rounded())
-        guard root > 0, root * root == values.count else {
-            throw KanaKanjiError.connectionMatrixIsNotSquare(fileURL, count: values.count)
+        let root = Int(Double(valueCount).squareRoot().rounded())
+        guard data.count.isMultiple(of: 2), root > 0, root * root == valueCount else {
+            throw KanaKanjiError.connectionMatrixIsNotSquare(fileURL, count: valueCount)
         }
 
-        return try ConnectionMatrix(costs: values)
+        return ConnectionMatrix(bigEndianInt16Data: data, dimension: root)
     }
 
     public func cost(previousLeftId: Int, currentRightId: Int) -> Int {
@@ -102,6 +99,24 @@ public struct ConnectionMatrix: Sendable {
             return 0
         }
 
-        return costs[previousLeftId * dimension + currentRightId]
+        let valueIndex = previousLeftId * dimension + currentRightId
+
+        switch storage {
+        case let .costs(costs):
+            guard valueIndex < costs.count else {
+                return 0
+            }
+            return costs[valueIndex]
+        case let .bigEndianInt16Data(data):
+            let byteOffset = valueIndex * 2
+            guard byteOffset + 1 < data.count else {
+                return 0
+            }
+
+            let firstIndex = data.index(data.startIndex, offsetBy: byteOffset)
+            let secondIndex = data.index(after: firstIndex)
+            let raw = UInt16(data[firstIndex]) << 8 | UInt16(data[secondIndex])
+            return Int(Int16(bitPattern: raw))
+        }
     }
 }
