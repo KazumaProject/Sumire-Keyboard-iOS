@@ -64,12 +64,16 @@ final class KeyboardViewController: UIInputViewController {
             configuration.baseBackgroundColor = .white
             configuration.baseForegroundColor = .label
             configuration.cornerStyle = .medium
+            configuration.titleLineBreakMode = .byTruncatingTail
             configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
             self.configuration = configuration
             titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
             titleLabel?.adjustsFontSizeToFitWidth = true
             titleLabel?.minimumScaleFactor = 0.72
+            titleLabel?.numberOfLines = 1
             titleLabel?.lineBreakMode = .byTruncatingTail
+            setContentHuggingPriority(.required, for: .horizontal)
+            setContentCompressionResistancePriority(.required, for: .horizontal)
             translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -85,7 +89,10 @@ final class KeyboardViewController: UIInputViewController {
             var newConfiguration = self.configuration
             newConfiguration?.title = title
             newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
+            newConfiguration?.titleLineBreakMode = .byTruncatingTail
             self.configuration = newConfiguration
+            titleLabel?.numberOfLines = 1
+            titleLabel?.lineBreakMode = .byTruncatingTail
         }
     }
 
