@@ -91,10 +91,16 @@ final class KeyboardViewController: UIInputViewController {
         case converting(selectedCandidateIndex: Int)
     }
 
+    private enum CompositionDisplayMode: Equatable {
+        case liveCandidate
+        case reading
+    }
+
     private struct PrecompositionStatus: Equatable {
         var language: PrecompositionLanguage
         var phase: PrecompositionPhase
         var liveConversionEnabled: Bool
+        var displayMode: CompositionDisplayMode
 
         var isConverting: Bool {
             if case .converting = phase {
@@ -158,6 +164,12 @@ final class KeyboardViewController: UIInputViewController {
             updatedConfiguration?.baseBackgroundColor = (isHighlighted || isSelected)
                 ? highlightedBackgroundColor
                 : normalBackgroundColor
+            configuration = updatedConfiguration
+        }
+
+        func updateTitle(_ title: String) {
+            var updatedConfiguration = configuration
+            updatedConfiguration?.title = title
             configuration = updatedConfiguration
         }
     }
@@ -373,8 +385,6 @@ final class KeyboardViewController: UIInputViewController {
 
             private func makeBottomTailPath(bodyRect: CGRect, tipY: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
                 let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
-                let baseLeft = bodyRect.minX + radius
-                let baseRight = bodyRect.maxX - radius
                 let path = UIBezierPath()
 
                 path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
@@ -383,19 +393,9 @@ final class KeyboardViewController: UIInputViewController {
                     to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
                     controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
                 )
-                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
-                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY)
-                )
-                path.addLine(to: CGPoint(x: baseRight, y: bodyRect.maxY))
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY))
                 path.addLine(to: CGPoint(x: bodyRect.midX, y: tipY))
-                path.addLine(to: CGPoint(x: baseLeft, y: bodyRect.maxY))
-                path.addLine(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.maxY))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY - radius),
-                    controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.maxY)
-                )
+                path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.maxY))
                 path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
                 path.addQuadCurve(
                     to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
@@ -407,19 +407,11 @@ final class KeyboardViewController: UIInputViewController {
 
             private func makeTopTailPath(bodyRect: CGRect, tipY: CGFloat, cornerRadius: CGFloat) -> UIBezierPath {
                 let radius = min(cornerRadius, bodyRect.width / 2, bodyRect.height / 2)
-                let baseLeft = bodyRect.minX + radius
-                let baseRight = bodyRect.maxX - radius
                 let path = UIBezierPath()
 
-                path.move(to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY))
-                path.addLine(to: CGPoint(x: baseLeft, y: bodyRect.minY))
+                path.move(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY))
                 path.addLine(to: CGPoint(x: bodyRect.midX, y: tipY))
-                path.addLine(to: CGPoint(x: baseRight, y: bodyRect.minY))
-                path.addLine(to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.minY))
-                path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY + radius),
-                    controlPoint: CGPoint(x: bodyRect.maxX, y: bodyRect.minY)
-                )
+                path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.minY))
                 path.addLine(to: CGPoint(x: bodyRect.maxX, y: bodyRect.maxY - radius))
                 path.addQuadCurve(
                     to: CGPoint(x: bodyRect.maxX - radius, y: bodyRect.maxY),
@@ -432,7 +424,7 @@ final class KeyboardViewController: UIInputViewController {
                 )
                 path.addLine(to: CGPoint(x: bodyRect.minX, y: bodyRect.minY + radius))
                 path.addQuadCurve(
-                    to: CGPoint(x: bodyRect.minX + radius, y: bodyRect.minY),
+                    to: CGPoint(x: bodyRect.minX, y: bodyRect.minY),
                     controlPoint: CGPoint(x: bodyRect.minX, y: bodyRect.minY)
                 )
                 path.close()
@@ -635,11 +627,13 @@ final class KeyboardViewController: UIInputViewController {
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
-        liveConversionEnabled: UserDefaults.standard.object(forKey: KeyboardViewController.liveConversionDefaultsKey) as? Bool ?? true
+        liveConversionEnabled: UserDefaults.standard.object(forKey: KeyboardViewController.liveConversionDefaultsKey) as? Bool ?? true,
+        displayMode: .liveCandidate
     ))
     private var composingText = ""
     private var composingCursorPosition = 0
     private var renderedComposingText = ""
+    private var renderedCursorPosition = 0
     private var conversionRange: Range<Int> = 0..<0
     private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
@@ -655,6 +649,7 @@ final class KeyboardViewController: UIInputViewController {
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
     private weak var activeKanaButton: KeyboardButton?
+    private weak var spaceButton: KeyboardButton?
     private var activeFlickDirection: FlickDirection = .center
     private var deleteRepeatTimer: Timer?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
@@ -827,6 +822,7 @@ final class KeyboardViewController: UIInputViewController {
         column.addArrangedSubview(arrowRow)
 
         let spaceButton = KeyboardButton(title: "空白", action: .space, style: .function)
+        self.spaceButton = spaceButton
         configureInputTargets(for: spaceButton)
         column.addArrangedSubview(spaceButton)
         buttons.append(spaceButton)
@@ -1154,6 +1150,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updatePreedit() {
         normalizeCompositionRanges()
+        updateSpaceButtonTitle()
 
         let candidates = currentCandidateTexts()
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
@@ -1187,6 +1184,20 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             candidateScrollView.setContentOffset(.zero, animated: false)
         }
+    }
+
+    private func updateSpaceButtonTitle() {
+        spaceButton?.updateTitle(canUseSpaceAsConversionKey ? "変換" : "空白")
+    }
+
+    private var canUseSpaceAsConversionKey: Bool {
+        guard composingText.isEmpty == false,
+              case .precomposition(let status) = inputStatus,
+              status.language == .japanese else {
+            return false
+        }
+
+        return true
     }
 
     private func addCandidateButton(
@@ -1345,12 +1356,22 @@ final class KeyboardViewController: UIInputViewController {
         inputStatus = .precomposition(status)
     }
 
+    private func setCompositionDisplayMode(_ displayMode: CompositionDisplayMode) {
+        guard case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        status.displayMode = displayMode
+        inputStatus = .precomposition(status)
+    }
+
     private func setLiveConversionEnabled(_ isEnabled: Bool) {
         guard case .precomposition(var status) = inputStatus else {
             return
         }
 
         status.liveConversionEnabled = isEnabled
+        status.displayMode = isEnabled ? .liveCandidate : .reading
         inputStatus = .precomposition(status)
         UserDefaults.standard.set(isEnabled, forKey: Self.liveConversionDefaultsKey)
         renderCurrentComposingText()
@@ -1363,6 +1384,9 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         status.phase = composingText.isEmpty ? .empty : .composing
+        if composingText.isEmpty {
+            status.displayMode = .liveCandidate
+        }
         inputStatus = .precomposition(status)
     }
 
@@ -1371,6 +1395,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        setCompositionDisplayMode(.liveCandidate)
         setPrecompositionPhase(.converting(selectedCandidateIndex: 0))
         renderCurrentComposingText()
         updatePreedit()
@@ -1392,6 +1417,7 @@ final class KeyboardViewController: UIInputViewController {
 
         let nextIndex = (currentIndex + offset + candidates.count) % candidates.count
         status.phase = .converting(selectedCandidateIndex: nextIndex)
+        status.displayMode = .liveCandidate
         inputStatus = .precomposition(status)
         renderCurrentComposingText()
         updatePreedit()
@@ -1410,8 +1436,17 @@ final class KeyboardViewController: UIInputViewController {
         var nextText = composingText
         let insertionIndex = stringIndex(in: nextText, offset: composingCursorPosition)
         nextText.insert(contentsOf: text, at: insertionIndex)
-        composingCursorPosition += text.count
-        setComposingText(nextText)
+        if canEditReadingDisplayDirectly {
+            textDocumentProxy.insertText(text)
+            composingText = nextText
+            renderedComposingText = nextText
+            composingCursorPosition += text.count
+            renderedCursorPosition += text.count
+            updateCompositionStateAfterTextMutation(resetsConversionRange: true)
+        } else {
+            composingCursorPosition += text.count
+            setComposingText(nextText)
+        }
     }
 
     private func replacePreviousComposingCharacter(with text: String) {
@@ -1429,8 +1464,18 @@ final class KeyboardViewController: UIInputViewController {
         let lowerIndex = stringIndex(in: nextText, offset: composingCursorPosition - 1)
         let upperIndex = stringIndex(in: nextText, offset: composingCursorPosition)
         nextText.replaceSubrange(lowerIndex..<upperIndex, with: text)
-        composingCursorPosition = composingCursorPosition - 1 + text.count
-        setComposingText(nextText)
+        if canEditReadingDisplayDirectly {
+            textDocumentProxy.deleteBackward()
+            textDocumentProxy.insertText(text)
+            composingText = nextText
+            renderedComposingText = nextText
+            composingCursorPosition = composingCursorPosition - 1 + text.count
+            renderedCursorPosition = renderedCursorPosition - 1 + text.count
+            updateCompositionStateAfterTextMutation(resetsConversionRange: true)
+        } else {
+            composingCursorPosition = composingCursorPosition - 1 + text.count
+            setComposingText(nextText)
+        }
     }
 
     private func commitComposingText(_ text: String) {
@@ -1456,12 +1501,14 @@ final class KeyboardViewController: UIInputViewController {
             conversionRange = nextRange
             underlineRange = nil
             composingCursorPosition = min(max(activeRange.lowerBound + text.count, 0), updatedText.count)
+            renderedCursorPosition = updatedText.count
             syncPrecompositionPhaseForCurrentText()
             renderCurrentComposingText()
         } else {
             composingText = ""
             renderedComposingText = ""
             composingCursorPosition = 0
+            renderedCursorPosition = 0
             conversionRange = 0..<0
             underlineRange = nil
             syncPrecompositionPhaseForCurrentText()
@@ -1477,6 +1524,7 @@ final class KeyboardViewController: UIInputViewController {
         composingText = ""
         renderedComposingText = ""
         composingCursorPosition = 0
+        renderedCursorPosition = 0
         conversionRange = 0..<0
         underlineRange = nil
         syncPrecompositionPhaseForCurrentText()
@@ -1486,13 +1534,23 @@ final class KeyboardViewController: UIInputViewController {
     private func setComposingText(_ text: String, resetsConversionRange: Bool = true) {
         composingText = text
         composingCursorPosition = min(max(composingCursorPosition, 0), text.count)
+        updateCompositionStateAfterTextMutation(resetsConversionRange: resetsConversionRange, updatesPreedit: false)
+        renderCurrentComposingText()
+        updatePreedit()
+    }
+
+    private func updateCompositionStateAfterTextMutation(
+        resetsConversionRange: Bool,
+        updatesPreedit: Bool = true
+    ) {
         if resetsConversionRange {
-            conversionRange = text.isEmpty ? 0..<0 : 0..<text.count
+            conversionRange = composingText.isEmpty ? 0..<0 : 0..<composingText.count
         }
         updateUnderlineRange()
         syncPrecompositionPhaseForCurrentText()
-        renderCurrentComposingText()
-        updatePreedit()
+        if updatesPreedit {
+            updatePreedit()
+        }
     }
 
     private func renderCurrentComposingText() {
@@ -1503,7 +1561,8 @@ final class KeyboardViewController: UIInputViewController {
         guard composingText.isEmpty == false,
               let status = currentPrecompositionStatus,
               status.liveConversionEnabled,
-              status.language == .japanese else {
+              status.language == .japanese,
+              status.displayMode == .liveCandidate else {
             return composingText
         }
 
@@ -1524,6 +1583,8 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        moveHostCursorToRenderedEnd()
+
         let sharedPrefixCount = commonPrefixCount(renderedComposingText, text)
         let deleteCount = renderedComposingText.count - sharedPrefixCount
 
@@ -1537,6 +1598,17 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         renderedComposingText = text
+        renderedCursorPosition = text.count
+    }
+
+    private func moveHostCursorToRenderedEnd() {
+        let offset = renderedComposingText.count - renderedCursorPosition
+        guard offset != 0 else {
+            return
+        }
+
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+        renderedCursorPosition += offset
     }
 
     private func deleteRenderedComposingText() {
@@ -1548,6 +1620,7 @@ final class KeyboardViewController: UIInputViewController {
             textDocumentProxy.deleteBackward()
         }
         renderedComposingText = ""
+        renderedCursorPosition = 0
     }
 
     private func deleteBackward() {
@@ -1564,8 +1637,17 @@ final class KeyboardViewController: UIInputViewController {
         let lowerIndex = stringIndex(in: nextText, offset: composingCursorPosition - 1)
         let upperIndex = stringIndex(in: nextText, offset: composingCursorPosition)
         nextText.removeSubrange(lowerIndex..<upperIndex)
-        composingCursorPosition -= 1
-        setComposingText(nextText, resetsConversionRange: false)
+        if canEditReadingDisplayDirectly {
+            textDocumentProxy.deleteBackward()
+            composingText = nextText
+            renderedComposingText = nextText
+            composingCursorPosition -= 1
+            renderedCursorPosition -= 1
+            updateCompositionStateAfterTextMutation(resetsConversionRange: false)
+        } else {
+            composingCursorPosition -= 1
+            setComposingText(nextText, resetsConversionRange: false)
+        }
     }
 
     private func moveLeftKey() {
@@ -1589,8 +1671,39 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        composingCursorPosition = min(max(composingCursorPosition + offset, 0), composingText.count)
+        let nextCursorPosition = min(max(composingCursorPosition + offset, 0), composingText.count)
+        switchToReadingDisplayForCursorEditingIfNeeded()
+
+        let hostCursorOffset = nextCursorPosition - renderedCursorPosition
+        composingCursorPosition = nextCursorPosition
+        renderedCursorPosition = nextCursorPosition
+        if hostCursorOffset != 0 {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: hostCursorOffset)
+        }
         updatePreedit()
+    }
+
+    private func switchToReadingDisplayForCursorEditingIfNeeded() {
+        guard case .precomposition(let status) = inputStatus,
+              status.language == .japanese,
+              status.liveConversionEnabled,
+              status.displayMode == .liveCandidate,
+              composingText.isEmpty == false else {
+            return
+        }
+
+        setCompositionDisplayMode(.reading)
+        renderCurrentComposingText()
+    }
+
+    private var canEditReadingDisplayDirectly: Bool {
+        guard case .precomposition(let status) = inputStatus,
+              status.displayMode == .reading,
+              renderedComposingText == composingText else {
+            return false
+        }
+
+        return true
     }
 
     private func moveConversionUpperBound(by offset: Int) {
