@@ -74,6 +74,36 @@ final class KeyboardViewController: UIInputViewController {
         case enter
     }
 
+    private enum InputStatus: Equatable {
+        case direct
+        case precomposition(PrecompositionStatus)
+    }
+
+    private enum PrecompositionLanguage: String, Equatable {
+        case japanese
+        case english
+        case number
+    }
+
+    private enum PrecompositionPhase: Equatable {
+        case empty
+        case composing
+        case converting(selectedCandidateIndex: Int)
+    }
+
+    private struct PrecompositionStatus: Equatable {
+        var language: PrecompositionLanguage
+        var phase: PrecompositionPhase
+        var liveConversionEnabled: Bool
+
+        var isConverting: Bool {
+            if case .converting = phase {
+                return true
+            }
+            return false
+        }
+    }
+
     private final class KeyboardButton: UIButton {
         let action: KeyAction
         private let normalBackgroundColor: UIColor
@@ -168,15 +198,16 @@ final class KeyboardViewController: UIInputViewController {
             updateColorsForCurrentTraits()
         }
 
-        func configure(title: String, committedText: String?, isEnabled: Bool) {
+        func configure(title: String, committedText: String?, isEnabled: Bool, isSelected: Bool = false) {
             self.committedText = committedText
             self.isEnabled = isEnabled
+            self.isSelected = isSelected
             alpha = isEnabled ? 1 : 0.55
 
             var newConfiguration = self.configuration
             newConfiguration?.title = title
-            newConfiguration?.baseBackgroundColor = KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
+            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
+            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
             newConfiguration?.titleLineBreakMode = .byTruncatingTail
             self.configuration = newConfiguration
             titleLabel?.numberOfLines = 1
@@ -186,8 +217,8 @@ final class KeyboardViewController: UIInputViewController {
 
         private func updateColorsForCurrentTraits() {
             var newConfiguration = self.configuration
-            newConfiguration?.baseBackgroundColor = KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isEnabled ? .label : .secondaryLabel
+            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
+            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
             self.configuration = newConfiguration
             layer.borderColor = UIColor.separator
                 .withAlphaComponent(traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.16)
@@ -601,7 +632,13 @@ final class KeyboardViewController: UIInputViewController {
     private var activeCandidateIndex = 0
     private var lastInsertedText = ""
     private var lastInputDate: Date?
+    private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
+        language: .japanese,
+        phase: .empty,
+        liveConversionEnabled: UserDefaults.standard.object(forKey: KeyboardViewController.liveConversionDefaultsKey) as? Bool ?? true
+    ))
     private var composingText = ""
+    private var composingCursorPosition = 0
     private var renderedComposingText = ""
     private var conversionRange: Range<Int> = 0..<0
     private var underlineRange: Range<Int>?
@@ -623,6 +660,7 @@ final class KeyboardViewController: UIInputViewController {
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
+    private static let liveConversionDefaultsKey = "SumireKeyboardLiveConversionEnabled"
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -662,6 +700,7 @@ final class KeyboardViewController: UIInputViewController {
         kanaKanjiConverter = nil
         Self.cachedKanaKanjiConverter = nil
         converterLoadFailureMessage = nil
+        renderCurrentComposingText()
         updatePreedit()
     }
 
@@ -898,27 +937,19 @@ final class KeyboardViewController: UIInputViewController {
             transformPreviousCharacter()
         case .delete:
             resetMultiTapState()
-            deleteBackward()
+            handleDeleteKey()
         case .moveLeft:
             resetMultiTapState()
-            moveLeftKey()
+            handleMoveLeftKey()
         case .moveRight:
             resetMultiTapState()
-            moveRightKey()
+            handleMoveRightKey()
         case .space:
             resetMultiTapState()
-            if composingText.isEmpty {
-                textDocumentProxy.insertText(" ")
-            } else {
-                commitDefaultCandidate()
-            }
+            handleSpaceKey()
         case .enter:
             resetMultiTapState()
-            if composingText.isEmpty {
-                textDocumentProxy.insertText("\n")
-            } else {
-                commitDefaultCandidate()
-            }
+            handleEnterKey()
         }
 
         clearActiveKanaButton()
@@ -992,7 +1023,7 @@ final class KeyboardViewController: UIInputViewController {
 
         if direction != .center, let text = flickCandidate(for: key, direction: direction) {
             resetMultiTapState()
-            setComposingText(composingText + text)
+            insertText(text)
             return
         }
 
@@ -1001,20 +1032,28 @@ final class KeyboardViewController: UIInputViewController {
             && lastInsertedText.isEmpty == false
             && lastInputDate.map { now.timeIntervalSince($0) <= multiTapInterval } == true
 
-        var nextComposingText = composingText
         if shouldCycle {
             activeCandidateIndex = (activeCandidateIndex + 1) % key.candidates.count
-            if nextComposingText.isEmpty == false {
-                nextComposingText.removeLast()
-            }
         } else {
             activeKeyLabel = key.label
             activeCandidateIndex = 0
         }
 
         let text = key.candidates[activeCandidateIndex]
-        nextComposingText.append(text)
-        setComposingText(nextComposingText)
+        if isDirectMode {
+            if shouldCycle {
+                for _ in lastInsertedText {
+                    textDocumentProxy.deleteBackward()
+                }
+            }
+            textDocumentProxy.insertText(text)
+        } else {
+            if shouldCycle {
+                replacePreviousComposingCharacter(with: text)
+            } else {
+                insertText(text)
+            }
+        }
         lastInsertedText = text
         lastInputDate = now
     }
@@ -1117,6 +1156,7 @@ final class KeyboardViewController: UIInputViewController {
         normalizeCompositionRanges()
 
         let candidates = currentCandidateTexts()
+        let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
 
         candidateButtons.removeAll()
         for view in candidateStack.arrangedSubviews {
@@ -1124,20 +1164,39 @@ final class KeyboardViewController: UIInputViewController {
             view.removeFromSuperview()
         }
 
+        guard isDirectMode == false else {
+            return
+        }
+
         guard candidates.isEmpty == false else {
             addCandidateButton(title: "候補", committedText: nil, isEnabled: false)
             return
         }
 
-        for candidate in candidates {
-            addCandidateButton(title: candidate, committedText: candidate, isEnabled: true)
+        for (index, candidate) in candidates.enumerated() {
+            addCandidateButton(
+                title: candidate,
+                committedText: candidate,
+                isEnabled: true,
+                isSelected: index == selectedCandidateIndex
+            )
         }
-        candidateScrollView.setContentOffset(.zero, animated: false)
+
+        if let selectedCandidateIndex {
+            scrollCandidateIntoView(at: selectedCandidateIndex)
+        } else {
+            candidateScrollView.setContentOffset(.zero, animated: false)
+        }
     }
 
-    private func addCandidateButton(title: String, committedText: String?, isEnabled: Bool) {
+    private func addCandidateButton(
+        title: String,
+        committedText: String?,
+        isEnabled: Bool,
+        isSelected: Bool = false
+    ) {
         let button = CandidateButton()
-        button.configure(title: title, committedText: committedText, isEnabled: isEnabled)
+        button.configure(title: title, committedText: committedText, isEnabled: isEnabled, isSelected: isSelected)
         button.addTarget(self, action: #selector(commitCandidate(_:)), for: .touchUpInside)
         candidateStack.addArrangedSubview(button)
         candidateButtons.append(button)
@@ -1147,12 +1206,231 @@ final class KeyboardViewController: UIInputViewController {
         ])
     }
 
+    private func scrollCandidateIntoView(at index: Int) {
+        guard candidateButtons.indices.contains(index) else {
+            return
+        }
+
+        let button = candidateButtons[index]
+        DispatchQueue.main.async { [weak self, weak button] in
+            guard let self, let button else {
+                return
+            }
+
+            let frame = button.convert(button.bounds, to: self.candidateScrollView)
+            self.candidateScrollView.scrollRectToVisible(frame.insetBy(dx: -8, dy: 0), animated: true)
+        }
+    }
+
+    private func handleDeleteKey() {
+        if isDirectMode || composingText.isEmpty {
+            textDocumentProxy.deleteBackward()
+            return
+        }
+
+        deleteBackward()
+    }
+
+    private func handleMoveLeftKey() {
+        switch inputStatus {
+        case .direct:
+            moveCursor(byCharacterOffset: -1)
+        case .precomposition(let status):
+            if status.isConverting {
+                moveSelectedConversionCandidate(by: -1)
+            } else {
+                moveComposingCursor(by: -1)
+            }
+        }
+    }
+
+    private func handleMoveRightKey() {
+        switch inputStatus {
+        case .direct:
+            moveCursor(byCharacterOffset: 1)
+        case .precomposition(let status):
+            if status.isConverting {
+                moveSelectedConversionCandidate(by: 1)
+            } else {
+                moveComposingCursor(by: 1)
+            }
+        }
+    }
+
+    private func handleSpaceKey() {
+        switch inputStatus {
+        case .direct:
+            textDocumentProxy.insertText(" ")
+        case .precomposition(let status):
+            guard composingText.isEmpty == false else {
+                textDocumentProxy.insertText(" ")
+                return
+            }
+
+            if status.language == .japanese {
+                switch status.phase {
+                case .converting:
+                    moveSelectedConversionCandidate(by: 1)
+                case .empty, .composing:
+                    enterConversionMode()
+                }
+            } else {
+                insertText(" ")
+            }
+        }
+    }
+
+    private func handleEnterKey() {
+        switch inputStatus {
+        case .direct:
+            textDocumentProxy.insertText("\n")
+        case .precomposition:
+            if composingText.isEmpty {
+                textDocumentProxy.insertText("\n")
+            } else {
+                commitSelectedOrDefaultCandidate()
+            }
+        }
+    }
+
     private func commitDefaultCandidate() {
         guard composingText.isEmpty == false else {
             return
         }
 
         commitComposingText(currentCandidateTexts().first ?? conversionTargetText())
+    }
+
+    private func commitSelectedOrDefaultCandidate() {
+        let candidates = currentCandidateTexts()
+        if let selectedIndex = currentSelectedCandidateIndex(candidateCount: candidates.count),
+           candidates.indices.contains(selectedIndex) {
+            commitComposingText(candidates[selectedIndex])
+            return
+        }
+
+        commitDefaultCandidate()
+    }
+
+    private var isDirectMode: Bool {
+        if case .direct = inputStatus {
+            return true
+        }
+        return false
+    }
+
+    private var currentPrecompositionStatus: PrecompositionStatus? {
+        if case .precomposition(let status) = inputStatus {
+            return status
+        }
+        return nil
+    }
+
+    private func currentSelectedCandidateIndex(candidateCount: Int) -> Int? {
+        guard candidateCount > 0,
+              case .precomposition(let status) = inputStatus,
+              case .converting(let selectedCandidateIndex) = status.phase else {
+            return nil
+        }
+
+        return min(max(selectedCandidateIndex, 0), candidateCount - 1)
+    }
+
+    private func setPrecompositionPhase(_ phase: PrecompositionPhase) {
+        guard case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        status.phase = phase
+        inputStatus = .precomposition(status)
+    }
+
+    private func setLiveConversionEnabled(_ isEnabled: Bool) {
+        guard case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        status.liveConversionEnabled = isEnabled
+        inputStatus = .precomposition(status)
+        UserDefaults.standard.set(isEnabled, forKey: Self.liveConversionDefaultsKey)
+        renderCurrentComposingText()
+        updatePreedit()
+    }
+
+    private func syncPrecompositionPhaseForCurrentText() {
+        guard case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        status.phase = composingText.isEmpty ? .empty : .composing
+        inputStatus = .precomposition(status)
+    }
+
+    private func enterConversionMode() {
+        guard composingText.isEmpty == false else {
+            return
+        }
+
+        setPrecompositionPhase(.converting(selectedCandidateIndex: 0))
+        renderCurrentComposingText()
+        updatePreedit()
+    }
+
+    private func moveSelectedConversionCandidate(by offset: Int) {
+        let candidates = currentCandidateTexts()
+        guard candidates.isEmpty == false,
+              case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        let currentIndex: Int
+        if case .converting(let selectedCandidateIndex) = status.phase {
+            currentIndex = min(max(selectedCandidateIndex, 0), candidates.count - 1)
+        } else {
+            currentIndex = 0
+        }
+
+        let nextIndex = (currentIndex + offset + candidates.count) % candidates.count
+        status.phase = .converting(selectedCandidateIndex: nextIndex)
+        inputStatus = .precomposition(status)
+        renderCurrentComposingText()
+        updatePreedit()
+    }
+
+    private func insertText(_ text: String) {
+        guard text.isEmpty == false else {
+            return
+        }
+
+        guard isDirectMode == false else {
+            textDocumentProxy.insertText(text)
+            return
+        }
+
+        var nextText = composingText
+        let insertionIndex = stringIndex(in: nextText, offset: composingCursorPosition)
+        nextText.insert(contentsOf: text, at: insertionIndex)
+        composingCursorPosition += text.count
+        setComposingText(nextText)
+    }
+
+    private func replacePreviousComposingCharacter(with text: String) {
+        guard isDirectMode == false else {
+            textDocumentProxy.insertText(text)
+            return
+        }
+
+        guard composingText.isEmpty == false, composingCursorPosition > 0 else {
+            insertText(text)
+            return
+        }
+
+        var nextText = composingText
+        let lowerIndex = stringIndex(in: nextText, offset: composingCursorPosition - 1)
+        let upperIndex = stringIndex(in: nextText, offset: composingCursorPosition)
+        nextText.replaceSubrange(lowerIndex..<upperIndex, with: text)
+        composingCursorPosition = composingCursorPosition - 1 + text.count
+        setComposingText(nextText)
     }
 
     private func commitComposingText(_ text: String) {
@@ -1177,11 +1455,16 @@ final class KeyboardViewController: UIInputViewController {
             renderedComposingText = updatedText
             conversionRange = nextRange
             underlineRange = nil
+            composingCursorPosition = min(max(activeRange.lowerBound + text.count, 0), updatedText.count)
+            syncPrecompositionPhaseForCurrentText()
+            renderCurrentComposingText()
         } else {
             composingText = ""
             renderedComposingText = ""
+            composingCursorPosition = 0
             conversionRange = 0..<0
             underlineRange = nil
+            syncPrecompositionPhaseForCurrentText()
         }
         updatePreedit()
     }
@@ -1193,19 +1476,47 @@ final class KeyboardViewController: UIInputViewController {
 
         composingText = ""
         renderedComposingText = ""
+        composingCursorPosition = 0
         conversionRange = 0..<0
         underlineRange = nil
+        syncPrecompositionPhaseForCurrentText()
         updatePreedit()
     }
 
     private func setComposingText(_ text: String, resetsConversionRange: Bool = true) {
-        replaceRenderedComposingText(with: text)
         composingText = text
+        composingCursorPosition = min(max(composingCursorPosition, 0), text.count)
         if resetsConversionRange {
             conversionRange = text.isEmpty ? 0..<0 : 0..<text.count
         }
         updateUnderlineRange()
+        syncPrecompositionPhaseForCurrentText()
+        renderCurrentComposingText()
         updatePreedit()
+    }
+
+    private func renderCurrentComposingText() {
+        replaceRenderedComposingText(with: renderedTextForCurrentComposition())
+    }
+
+    private func renderedTextForCurrentComposition() -> String {
+        guard composingText.isEmpty == false,
+              let status = currentPrecompositionStatus,
+              status.liveConversionEnabled,
+              status.language == .japanese else {
+            return composingText
+        }
+
+        let candidates = currentCandidateTexts()
+        let replacement: String
+        if let selectedIndex = currentSelectedCandidateIndex(candidateCount: candidates.count),
+           candidates.indices.contains(selectedIndex) {
+            replacement = candidates[selectedIndex]
+        } else {
+            replacement = candidates.first ?? conversionTargetText()
+        }
+
+        return replacingText(in: normalizedConversionRange(), with: replacement)
     }
 
     private func replaceRenderedComposingText(with text: String) {
@@ -1245,8 +1556,15 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        guard composingCursorPosition > 0 else {
+            return
+        }
+
         var nextText = composingText
-        nextText.removeLast()
+        let lowerIndex = stringIndex(in: nextText, offset: composingCursorPosition - 1)
+        let upperIndex = stringIndex(in: nextText, offset: composingCursorPosition)
+        nextText.removeSubrange(lowerIndex..<upperIndex)
+        composingCursorPosition -= 1
         setComposingText(nextText, resetsConversionRange: false)
     }
 
@@ -1263,6 +1581,16 @@ final class KeyboardViewController: UIInputViewController {
             commitRenderedComposingTextAsTyped()
         }
         textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+    }
+
+    private func moveComposingCursor(by offset: Int) {
+        guard composingText.isEmpty == false else {
+            textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+            return
+        }
+
+        composingCursorPosition = min(max(composingCursorPosition + offset, 0), composingText.count)
+        updatePreedit()
     }
 
     private func moveConversionUpperBound(by offset: Int) {
@@ -1294,7 +1622,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func currentCandidateTexts() -> [String] {
-        guard composingText.isEmpty == false else {
+        guard isDirectMode == false, composingText.isEmpty == false else {
             return []
         }
 
@@ -1311,6 +1639,11 @@ final class KeyboardViewController: UIInputViewController {
                 return
             }
             candidates.append(text)
+        }
+
+        guard currentPrecompositionStatus?.language == .japanese else {
+            appendUnique(targetText)
+            return candidates
         }
 
         if let kanaKanjiConverter {
@@ -1459,6 +1792,7 @@ final class KeyboardViewController: UIInputViewController {
         if let cachedConverter = Self.cachedKanaKanjiConverter {
             kanaKanjiConverter = cachedConverter
             converterLoadFailureMessage = nil
+            renderCurrentComposingText()
             updatePreedit()
             return
         }
@@ -1501,6 +1835,7 @@ final class KeyboardViewController: UIInputViewController {
                     self.kanaKanjiConverter = nil
                     self.converterLoadFailureMessage = error.localizedDescription
                 }
+                self.renderCurrentComposingText()
                 self.updatePreedit()
             }
         }
