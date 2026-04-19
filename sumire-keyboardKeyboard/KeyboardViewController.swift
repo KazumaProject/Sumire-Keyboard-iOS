@@ -1193,7 +1193,8 @@ final class KeyboardViewController: UIInputViewController {
     private var canUseSpaceAsConversionKey: Bool {
         guard composingText.isEmpty == false,
               case .precomposition(let status) = inputStatus,
-              status.language == .japanese else {
+              status.language == .japanese,
+              normalizedConversionRange().isEmpty == false else {
             return false
         }
 
@@ -1279,6 +1280,11 @@ final class KeyboardViewController: UIInputViewController {
             }
 
             if status.language == .japanese {
+                guard canUseSpaceAsConversionKey else {
+                    insertText(" ")
+                    return
+                }
+
                 switch status.phase {
                 case .converting:
                     moveSelectedConversionCandidate(by: 1)
@@ -1391,7 +1397,8 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func enterConversionMode() {
-        guard composingText.isEmpty == false else {
+        guard composingText.isEmpty == false,
+              normalizedConversionRange().isEmpty == false else {
             return
         }
 
@@ -1484,24 +1491,22 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         let activeRange = normalizedConversionRange()
-        let remainingUnderlineRange = underlineRange
+        guard activeRange.isEmpty == false else {
+            return
+        }
+
+        let remainingText = self.text(in: activeRange.upperBound..<composingText.count, from: composingText)
         let updatedText = replacingText(in: activeRange, with: text)
 
         replaceRenderedComposingText(with: updatedText)
 
-        if let remainingUnderlineRange,
-           let nextRange = adjustedRangeAfterReplacement(
-                remainingUnderlineRange,
-                replacedRange: activeRange,
-                replacementCharacterCount: text.count,
-                updatedTextCount: updatedText.count
-           ) {
-            composingText = updatedText
-            renderedComposingText = updatedText
-            conversionRange = nextRange
+        if remainingText.isEmpty == false {
+            composingText = remainingText
+            renderedComposingText = remainingText
+            composingCursorPosition = remainingText.count
+            renderedCursorPosition = remainingText.count
+            conversionRange = conversionRangeBeforeCursor()
             underlineRange = nil
-            composingCursorPosition = min(max(activeRange.lowerBound + text.count, 0), updatedText.count)
-            renderedCursorPosition = updatedText.count
             syncPrecompositionPhaseForCurrentText()
             renderCurrentComposingText()
         } else {
@@ -1544,7 +1549,7 @@ final class KeyboardViewController: UIInputViewController {
         updatesPreedit: Bool = true
     ) {
         if resetsConversionRange {
-            conversionRange = composingText.isEmpty ? 0..<0 : 0..<composingText.count
+            conversionRange = conversionRangeBeforeCursor()
         }
         updateUnderlineRange()
         syncPrecompositionPhaseForCurrentText()
@@ -1677,6 +1682,8 @@ final class KeyboardViewController: UIInputViewController {
         let hostCursorOffset = nextCursorPosition - renderedCursorPosition
         composingCursorPosition = nextCursorPosition
         renderedCursorPosition = nextCursorPosition
+        conversionRange = conversionRangeBeforeCursor()
+        updateUnderlineRange()
         if hostCursorOffset != 0 {
             textDocumentProxy.adjustTextPosition(byCharacterOffset: hostCursorOffset)
         }
@@ -1777,6 +1784,15 @@ final class KeyboardViewController: UIInputViewController {
         text(in: normalizedConversionRange(), from: composingText)
     }
 
+    private func conversionRangeBeforeCursor() -> Range<Int> {
+        guard composingText.isEmpty == false, composingCursorPosition > 0 else {
+            return 0..<0
+        }
+
+        let upperBound = min(max(composingCursorPosition, 0), composingText.count)
+        return 0..<upperBound
+    }
+
     private func updateUnderlineRange() {
         guard composingText.isEmpty == false else {
             underlineRange = nil
@@ -1809,6 +1825,9 @@ final class KeyboardViewController: UIInputViewController {
     private func normalizedConversionRange() -> Range<Int> {
         let count = composingText.count
         guard count > 0 else {
+            return 0..<0
+        }
+        guard conversionRange.isEmpty == false else {
             return 0..<0
         }
 
