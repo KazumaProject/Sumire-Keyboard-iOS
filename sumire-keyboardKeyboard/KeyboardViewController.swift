@@ -652,6 +652,7 @@ final class KeyboardViewController: UIInputViewController {
     private weak var spaceButton: KeyboardButton?
     private var activeFlickDirection: FlickDirection = .center
     private var deleteRepeatTimer: Timer?
+    private var cursorRepeatTimer: Timer?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
@@ -683,6 +684,7 @@ final class KeyboardViewController: UIInputViewController {
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
         stopDeleteRepeat()
+        stopCursorRepeat()
         commitRenderedComposingTextAsTyped()
     }
 
@@ -860,6 +862,16 @@ final class KeyboardViewController: UIInputViewController {
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
+        } else if case .moveLeft = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleCursorLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
+        } else if case .moveRight = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleCursorLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
         }
     }
 
@@ -899,6 +911,7 @@ final class KeyboardViewController: UIInputViewController {
 
     @objc private func handleTouchCancel(_ sender: KeyboardButton) {
         stopDeleteRepeat()
+        stopCursorRepeat()
         clearActiveKanaButton()
         activeFlickDirection = .center
         hideFlickGuide()
@@ -984,6 +997,28 @@ final class KeyboardViewController: UIInputViewController {
             startDeleteRepeat()
         case .ended, .cancelled, .failed:
             stopDeleteRepeat()
+            DispatchQueue.main.async { [weak self] in
+                self?.suppressNextButtonRelease = false
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func handleCursorLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard let button = gesture.view as? KeyboardButton else {
+            return
+        }
+
+        switch gesture.state {
+        case .began:
+            suppressNextButtonRelease = true
+            resetMultiTapState()
+            hideFlickGuide()
+            handleCursorRepeat(for: button.action)
+            startCursorRepeat(for: button.action)
+        case .ended, .cancelled, .failed:
+            stopCursorRepeat()
             DispatchQueue.main.async { [weak self] in
                 self?.suppressNextButtonRelease = false
             }
@@ -1739,6 +1774,31 @@ final class KeyboardViewController: UIInputViewController {
     private func stopDeleteRepeat() {
         deleteRepeatTimer?.invalidate()
         deleteRepeatTimer = nil
+    }
+
+    private func startCursorRepeat(for action: KeyAction) {
+        stopCursorRepeat()
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            self?.handleCursorRepeat(for: action)
+        }
+        cursorRepeatTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopCursorRepeat() {
+        cursorRepeatTimer?.invalidate()
+        cursorRepeatTimer = nil
+    }
+
+    private func handleCursorRepeat(for action: KeyAction) {
+        switch action {
+        case .moveLeft:
+            handleMoveLeftKey()
+        case .moveRight:
+            handleMoveRightKey()
+        default:
+            break
+        }
     }
 
     private func currentCandidateTexts() -> [String] {
