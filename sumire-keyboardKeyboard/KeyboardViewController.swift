@@ -66,7 +66,13 @@ final class KeyboardViewController: UIInputViewController {
 
     private enum KeyAction {
         case kana(KanaKey)
+        case flickOnly(KanaKey)
         case transform
+        case reverseCycle
+        case switchMode
+        case emojiKeyboard
+        case togglePreviousAlphabetCase
+        case nextKeyboard
         case delete
         case moveLeft
         case moveRight
@@ -83,6 +89,11 @@ final class KeyboardViewController: UIInputViewController {
         case japanese
         case english
         case number
+    }
+
+    private enum MainKeyboardPanel: Equatable {
+        case text
+        case emoji
     }
 
     private enum PrecompositionPhase: Equatable {
@@ -114,15 +125,31 @@ final class KeyboardViewController: UIInputViewController {
         let action: KeyAction
         private let normalBackgroundColor: UIColor
         private let highlightedBackgroundColor: UIColor
+        private let normalForegroundColor: UIColor
+        private var stackedTitleStack: UIStackView?
 
-        init(title: String, action: KeyAction, style: ButtonStyle) {
+        init(
+            title: String? = nil,
+            systemImageName: String? = nil,
+            symbolPointSize: CGFloat = 19,
+            action: KeyAction,
+            style: ButtonStyle
+        ) {
             self.action = action
             self.normalBackgroundColor = style.backgroundColor
             self.highlightedBackgroundColor = style.highlightedBackgroundColor
+            self.normalForegroundColor = style.foregroundColor
             super.init(frame: .zero)
 
             var configuration = UIButton.Configuration.filled()
             configuration.title = title
+            if let systemImageName {
+                configuration.image = UIImage(systemName: systemImageName)
+                configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+                    pointSize: symbolPointSize,
+                    weight: .semibold
+                )
+            }
             configuration.baseBackgroundColor = style.backgroundColor
             configuration.baseForegroundColor = style.foregroundColor
             configuration.cornerStyle = .medium
@@ -168,9 +195,83 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         func updateTitle(_ title: String) {
+            removeStackedTitle()
             var updatedConfiguration = configuration
             updatedConfiguration?.title = title
+            updatedConfiguration?.image = nil
             configuration = updatedConfiguration
+        }
+
+        func updateSystemImage(_ systemImageName: String) {
+            removeStackedTitle()
+            var updatedConfiguration = configuration
+            updatedConfiguration?.title = nil
+            updatedConfiguration?.image = UIImage(systemName: systemImageName)
+            updatedConfiguration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+                pointSize: 19,
+                weight: .semibold
+            )
+            configuration = updatedConfiguration
+        }
+
+        func setFunctionEnabled(_ isEnabled: Bool) {
+            self.isEnabled = isEnabled
+            alpha = isEnabled ? 1 : 0.38
+            var updatedConfiguration = configuration
+            updatedConfiguration?.baseForegroundColor = isEnabled ? normalForegroundColor : .secondaryLabel
+            configuration = updatedConfiguration
+        }
+
+        func configureStackedTitle(
+            primary: String,
+            secondary: String,
+            primaryFontSize: CGFloat = 26,
+            secondaryFontSize: CGFloat = 15
+        ) {
+            var updatedConfiguration = configuration
+            updatedConfiguration?.title = nil
+            updatedConfiguration?.image = nil
+            configuration = updatedConfiguration
+
+            removeStackedTitle()
+
+            let primaryLabel = UILabel()
+            primaryLabel.text = primary
+            primaryLabel.textColor = normalForegroundColor
+            primaryLabel.font = .systemFont(ofSize: primaryFontSize, weight: .regular)
+            primaryLabel.textAlignment = .center
+            primaryLabel.adjustsFontSizeToFitWidth = true
+            primaryLabel.minimumScaleFactor = 0.72
+
+            let secondaryLabel = UILabel()
+            secondaryLabel.text = secondary
+            secondaryLabel.textColor = normalForegroundColor
+            secondaryLabel.font = .systemFont(ofSize: secondaryFontSize, weight: .regular)
+            secondaryLabel.textAlignment = .center
+            secondaryLabel.adjustsFontSizeToFitWidth = true
+            secondaryLabel.minimumScaleFactor = 0.7
+
+            let stack = UIStackView(arrangedSubviews: [primaryLabel, secondaryLabel])
+            stack.axis = .vertical
+            stack.alignment = .center
+            stack.distribution = .fill
+            stack.spacing = 0
+            stack.isUserInteractionEnabled = false
+            stack.translatesAutoresizingMaskIntoConstraints = false
+
+            addSubview(stack)
+            stackedTitleStack = stack
+            NSLayoutConstraint.activate([
+                stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+                stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+                stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
+                stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4)
+            ])
+        }
+
+        private func removeStackedTitle() {
+            stackedTitleStack?.removeFromSuperview()
+            stackedTitleStack = nil
         }
     }
 
@@ -599,12 +700,12 @@ final class KeyboardViewController: UIInputViewController {
 
     private let kanaRows: [[KanaKey]] = [
         [
-            KanaKey(label: "あ", candidates: ["あ", "い", "う", "え", "お"]),
+            KanaKey(label: "あ", candidates: ["あ", "い", "う", "え", "お", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ"]),
             KanaKey(label: "か", candidates: ["か", "き", "く", "け", "こ"]),
             KanaKey(label: "さ", candidates: ["さ", "し", "す", "せ", "そ"])
         ],
         [
-            KanaKey(label: "た", candidates: ["た", "ち", "つ", "て", "と"]),
+            KanaKey(label: "た", candidates: ["た", "ち", "つ", "て", "と", "っ"]),
             KanaKey(label: "な", candidates: ["な", "に", "ぬ", "ね", "の"]),
             KanaKey(label: "は", candidates: ["は", "ひ", "ふ", "へ", "ほ"])
         ],
@@ -620,10 +721,35 @@ final class KeyboardViewController: UIInputViewController {
         ]
     ]
 
+    private let numberRows: [[KanaKey]] = [
+        [
+            KanaKey(label: "1★♪→", candidates: ["1", "★", "♪", "→"]),
+            KanaKey(label: "2¥$€", candidates: ["2", "¥", "$", "€"]),
+            KanaKey(label: "3%°#", candidates: ["3", "%", "°", "#"])
+        ],
+        [
+            KanaKey(label: "4○*・", candidates: ["4", "○", "*", "・"]),
+            KanaKey(label: "5+×÷", candidates: ["5", "+", "×", "÷"]),
+            KanaKey(label: "6<=>", candidates: ["6", "<", "=", ">"])
+        ],
+        [
+            KanaKey(label: "7「」:", candidates: ["7", "「", "」", ":"]),
+            KanaKey(label: "8〒々〆", candidates: ["8", "〒", "々", "〆"]),
+            KanaKey(label: "9^|\\", candidates: ["9", "^", "|", "\\"])
+        ],
+        [
+            KanaKey(label: "()[]", candidates: ["(", ")", "[", "]"]),
+            KanaKey(label: "0~⋯", candidates: ["0", "~", "⋯"]),
+            KanaKey(label: ".,-/", candidates: [".", ",", "-", "/"])
+        ]
+    ]
+
     private var activeKeyLabel: String?
     private var activeCandidateIndex = 0
+    private var activeKeyCandidates: [String] = []
     private var lastInsertedText = ""
     private var lastInputDate: Date?
+    private var mainKeyboardPanel: MainKeyboardPanel = .text
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
@@ -642,6 +768,8 @@ final class KeyboardViewController: UIInputViewController {
     private var candidateButtons: [CandidateButton] = []
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
+    private let keyboardStack = UIStackView()
+    private let mainKeyboardContainer = UIView()
     private let flickGuideView = FlickGuideView()
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
@@ -653,6 +781,11 @@ final class KeyboardViewController: UIInputViewController {
     private var activeFlickDirection: FlickDirection = .center
     private var deleteRepeatTimer: Timer?
     private var cursorRepeatTimer: Timer?
+    private var reverseCycleStateTimer: Timer?
+    private weak var reverseCycleButton: KeyboardButton?
+    private weak var modeSwitchButton: KeyboardButton?
+    private var keyboardSwitchLongPressTimer: Timer?
+    private var shouldSuppressNextKeyboardTap = false
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
@@ -685,6 +818,8 @@ final class KeyboardViewController: UIInputViewController {
         scheduledKanaKanjiLoad = nil
         stopDeleteRepeat()
         stopCursorRepeat()
+        stopReverseCycleStateTimer()
+        stopKeyboardSwitchLongPressTimer()
         commitRenderedComposingTextAsTyped()
     }
 
@@ -710,16 +845,18 @@ final class KeyboardViewController: UIInputViewController {
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
         let candidateBar = makeCandidateBar()
-        let keyboardStack = UIStackView()
         keyboardStack.axis = .horizontal
         keyboardStack.alignment = .fill
         keyboardStack.distribution = .fill
         keyboardStack.spacing = 6
 
-        let kanaGrid = makeKanaGrid()
+        let leftControlColumn = makeLeftControlColumn()
         let controlColumn = makeControlColumn()
+        mainKeyboardContainer.translatesAutoresizingMaskIntoConstraints = false
+        rebuildMainKeyboardPanel()
 
-        keyboardStack.addArrangedSubview(kanaGrid)
+        keyboardStack.addArrangedSubview(leftControlColumn)
+        keyboardStack.addArrangedSubview(mainKeyboardContainer)
         keyboardStack.addArrangedSubview(controlColumn)
         contentStack.addArrangedSubview(candidateBar)
         contentStack.addArrangedSubview(keyboardStack)
@@ -736,8 +873,12 @@ final class KeyboardViewController: UIInputViewController {
             contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
 
             candidateBar.heightAnchor.constraint(equalToConstant: 38),
-            controlColumn.widthAnchor.constraint(equalTo: kanaGrid.widthAnchor, multiplier: 0.28)
+            leftControlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28),
+            controlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28)
         ])
+
+        updateModeSwitchButtonTitle()
+        updateReverseCycleButtonState()
     }
 
     private func makeCandidateBar() -> UIView {
@@ -764,14 +905,35 @@ final class KeyboardViewController: UIInputViewController {
         return candidateScrollView
     }
 
-    private func makeKanaGrid() -> UIStackView {
+    private func rebuildMainKeyboardPanel() {
+        mainKeyboardContainer.subviews.forEach { $0.removeFromSuperview() }
+
+        let panel: UIView
+        switch mainKeyboardPanel {
+        case .text:
+            panel = makeKeyGrid()
+        case .emoji:
+            panel = makeEmojiPlaceholderView()
+        }
+
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        mainKeyboardContainer.addSubview(panel)
+        NSLayoutConstraint.activate([
+            panel.topAnchor.constraint(equalTo: mainKeyboardContainer.topAnchor),
+            panel.leadingAnchor.constraint(equalTo: mainKeyboardContainer.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: mainKeyboardContainer.trailingAnchor),
+            panel.bottomAnchor.constraint(equalTo: mainKeyboardContainer.bottomAnchor)
+        ])
+    }
+
+    private func makeKeyGrid() -> UIStackView {
         let grid = UIStackView()
         grid.axis = .vertical
         grid.alignment = .fill
         grid.distribution = .fillEqually
         grid.spacing = 6
 
-        for row in kanaRows {
+        for row in currentKeyRows() {
             let rowStack = UIStackView()
             rowStack.axis = .horizontal
             rowStack.alignment = .fill
@@ -779,8 +941,20 @@ final class KeyboardViewController: UIInputViewController {
             rowStack.spacing = 6
 
             for key in row {
-                let action: KeyAction = key.candidates.isEmpty ? .transform : .kana(key)
+                let action = action(for: key)
                 let button = KeyboardButton(title: key.label, action: action, style: .kana)
+                if currentPrecompositionStatus?.language == .number {
+                    if let display = numberKeyDisplay(for: key) {
+                        button.configureStackedTitle(primary: display.primary, secondary: display.secondary)
+                    }
+                } else if key.label == "゛゜小" {
+                    button.configureStackedTitle(
+                        primary: "゛゜",
+                        secondary: "小",
+                        primaryFontSize: 22,
+                        secondaryFontSize: 16
+                    )
+                }
                 configureInputTargets(for: button)
                 rowStack.addArrangedSubview(button)
             }
@@ -789,6 +963,193 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         return grid
+    }
+
+    private func currentKeyRows() -> [[KanaKey]] {
+        guard let language = currentPrecompositionStatus?.language else {
+            return kanaRows
+        }
+
+        switch language {
+        case .japanese:
+            return kanaRows
+        case .english:
+            return englishRows()
+        case .number:
+            return numberRows
+        }
+    }
+
+    private func englishRows() -> [[KanaKey]] {
+        return [
+            [
+                KanaKey(label: "@#/&_", candidates: ["@", "#", "/", "&", "_"]),
+                englishKey("ABC"),
+                englishKey("DEF")
+            ],
+            [
+                englishKey("GHI"),
+                englishKey("JKL"),
+                englishKey("MNO")
+            ],
+            [
+                englishKey("PQRS"),
+                englishKey("TUV"),
+                englishKey("WXYZ")
+            ],
+            [
+                KanaKey(label: "a/A", candidates: []),
+                KanaKey(label: "'\"()", candidates: ["'", "\"", "(", ")"]),
+                KanaKey(label: ".,!?", candidates: [".", ",", "!", "?"])
+            ]
+        ]
+    }
+
+    private func englishKey(_ label: String) -> KanaKey {
+        let lowercasedCandidates = label.map { String($0).lowercased() }
+        let uppercasedCandidates = label.map { String($0).uppercased() }
+        return KanaKey(label: label, candidates: lowercasedCandidates + uppercasedCandidates)
+    }
+
+    private func action(for key: KanaKey) -> KeyAction {
+        if currentPrecompositionStatus?.language == .number {
+            return .flickOnly(key)
+        }
+
+        if key.label == "゛゜小" {
+            return .transform
+        }
+
+        if key.label == "a/A" {
+            return .togglePreviousAlphabetCase
+        }
+
+        return .kana(key)
+    }
+
+    private func numberKeyDisplay(for key: KanaKey) -> (primary: String, secondary: String)? {
+        guard key.label != "()[]", key.label != ".,-/" else {
+            return nil
+        }
+
+        guard let first = key.candidates.first else {
+            return nil
+        }
+
+        return (first, key.candidates.dropFirst().joined())
+    }
+
+    private func makeEmojiPlaceholderView() -> UIView {
+        let container = UIView()
+        container.backgroundColor = KeyboardTheme.keyBackground.withAlphaComponent(0.36)
+        container.layer.cornerRadius = 8
+        container.layer.masksToBounds = true
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.distribution = .fill
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = UIImageView(image: UIImage(systemName: "face.smiling"))
+        icon.tintColor = .secondaryLabel
+        icon.contentMode = .scaleAspectFit
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = UILabel()
+        titleLabel.text = "絵文字"
+        titleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        titleLabel.textColor = .label
+
+        let messageLabel = UILabel()
+        messageLabel.text = "絵文字辞書を準備中"
+        messageLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        messageLabel.textColor = .secondaryLabel
+        messageLabel.textAlignment = .center
+        messageLabel.numberOfLines = 2
+
+        stack.addArrangedSubview(icon)
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(messageLabel)
+        container.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 34),
+            icon.heightAnchor.constraint(equalToConstant: 34),
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12)
+        ])
+
+        return container
+    }
+
+    private func makeLeftControlColumn() -> UIStackView {
+        let column = UIStackView()
+        column.axis = .vertical
+        column.alignment = .fill
+        column.distribution = .fillEqually
+        column.spacing = 6
+
+        let reverseButton = KeyboardButton(
+            systemImageName: "arrow.counterclockwise",
+            symbolPointSize: 16,
+            action: .reverseCycle,
+            style: .function
+        )
+        reverseCycleButton = reverseButton
+        configureInputTargets(for: reverseButton)
+        column.addArrangedSubview(reverseButton)
+
+        let modeButton = KeyboardButton(title: "ABC", action: .switchMode, style: .function)
+        modeSwitchButton = modeButton
+        configureInputTargets(for: modeButton)
+        column.addArrangedSubview(modeButton)
+
+        let emojiButton = KeyboardButton(
+            systemImageName: "face.smiling",
+            symbolPointSize: 16,
+            action: .emojiKeyboard,
+            style: .function
+        )
+        configureInputTargets(for: emojiButton)
+        column.addArrangedSubview(emojiButton)
+
+        let keyboardButton = KeyboardButton(
+            systemImageName: "globe",
+            symbolPointSize: 16,
+            action: .nextKeyboard,
+            style: .function
+        )
+        configureKeyboardSwitchTargets(for: keyboardButton)
+        column.addArrangedSubview(keyboardButton)
+
+        return column
+    }
+
+    private func configureKeyboardSwitchTargets(for button: KeyboardButton) {
+        button.addTarget(
+            self,
+            action: #selector(handleKeyboardSwitchTouchDown(_:event:)),
+            for: .touchDown
+        )
+        button.addTarget(
+            self,
+            action: #selector(handleKeyboardSwitchTouchUp(_:event:)),
+            for: [.touchUpInside, .touchUpOutside]
+        )
+        button.addTarget(
+            self,
+            action: #selector(handleKeyboardSwitchTouchCancel(_:)),
+            for: .touchCancel
+        )
+        button.addTarget(
+            self,
+            action: #selector(handleInputModeList(from:with:)),
+            for: .allTouchEvents
+        )
     }
 
     private func makeControlColumn() -> UIStackView {
@@ -862,6 +1223,11 @@ final class KeyboardViewController: UIInputViewController {
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
+        } else if case .flickOnly = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
         } else if case .moveLeft = button.action {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleCursorLongPress(_:)))
             longPress.minimumPressDuration = 0.35
@@ -876,7 +1242,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
-        guard case .kana = sender.action else {
+        guard keyRequiringFlickTracking(from: sender.action) != nil else {
             return
         }
 
@@ -887,7 +1253,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDrag(_ sender: KeyboardButton, event: UIEvent) {
-        guard case .kana(let key) = sender.action else {
+        guard let key = keyRequiringFlickTracking(from: sender.action) else {
             return
         }
 
@@ -920,7 +1286,7 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func handleKanaLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began,
               let button = gesture.view as? KeyboardButton,
-              case .kana(let key) = button.action else {
+              let key = keyRequiringFlickTracking(from: button.action) else {
             return
         }
 
@@ -942,8 +1308,25 @@ final class KeyboardViewController: UIInputViewController {
         switch sender.action {
         case .kana(let key):
             insertCandidate(for: key, direction: activeFlickDirection)
+        case .flickOnly(let key):
+            insertFlickOnlyCandidate(for: key, direction: activeFlickDirection)
         case .transform:
             transformPreviousCharacter()
+        case .reverseCycle:
+            handleReverseCycleKey()
+        case .switchMode:
+            resetMultiTapState()
+            handleSwitchModeKey()
+        case .emojiKeyboard:
+            resetMultiTapState()
+            handleEmojiKeyboardKey()
+        case .togglePreviousAlphabetCase:
+            resetMultiTapState()
+            handleTogglePreviousAlphabetCaseKey()
+        case .nextKeyboard:
+            resetMultiTapState()
+            commitRenderedComposingTextAsTyped()
+            advanceToNextInputMode()
         case .delete:
             resetMultiTapState()
             handleDeleteKey()
@@ -964,6 +1347,36 @@ final class KeyboardViewController: UIInputViewController {
         clearActiveKanaButton()
         activeFlickDirection = .center
         hideFlickGuide()
+    }
+
+    @objc private func handleKeyboardSwitchTouchDown(_ sender: KeyboardButton, event: UIEvent) {
+        resetMultiTapState()
+        hideFlickGuide()
+        shouldSuppressNextKeyboardTap = false
+        stopKeyboardSwitchLongPressTimer()
+
+        let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
+            self?.shouldSuppressNextKeyboardTap = true
+            self?.commitRenderedComposingTextAsTyped()
+        }
+        keyboardSwitchLongPressTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func handleKeyboardSwitchTouchUp(_ sender: KeyboardButton, event: UIEvent) {
+        stopKeyboardSwitchLongPressTimer()
+        guard shouldSuppressNextKeyboardTap == false else {
+            shouldSuppressNextKeyboardTap = false
+            return
+        }
+
+        commitRenderedComposingTextAsTyped()
+        advanceToNextInputMode()
+    }
+
+    @objc private func handleKeyboardSwitchTouchCancel(_ sender: KeyboardButton) {
+        stopKeyboardSwitchLongPressTimer()
+        shouldSuppressNextKeyboardTap = false
     }
 
     @objc private func commitCandidate(_ sender: CandidateButton) {
@@ -1069,6 +1482,7 @@ final class KeyboardViewController: UIInputViewController {
             activeKeyLabel = key.label
             activeCandidateIndex = 0
         }
+        activeKeyCandidates = key.candidates
 
         let text = key.candidates[activeCandidateIndex]
         if isDirectMode {
@@ -1087,9 +1501,29 @@ final class KeyboardViewController: UIInputViewController {
         }
         lastInsertedText = text
         lastInputDate = now
+        scheduleReverseCycleStateTimer()
+        updateReverseCycleButtonState()
+    }
+
+    private func insertFlickOnlyCandidate(for key: KanaKey, direction: FlickDirection) {
+        resetMultiTapState()
+        guard let text = flickCandidate(for: key, direction: direction) else {
+            return
+        }
+
+        insertText(text)
     }
 
     private func flickCandidate(for key: KanaKey, direction: FlickDirection) -> String? {
+        if currentPrecompositionStatus?.language == .english {
+            let usableCount = isEnglishAlphabetLabel(key.label) ? key.label.count : key.candidates.count
+            return directionalCandidate(from: key.candidates, direction: direction, usableCount: usableCount)
+        }
+
+        if currentPrecompositionStatus?.language == .number {
+            return directionalCandidate(from: key.candidates, direction: direction)
+        }
+
         switch key.label {
         case "や":
             switch direction {
@@ -1150,6 +1584,42 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func directionalCandidate(
+        from candidates: [String],
+        direction: FlickDirection,
+        usableCount: Int? = nil
+    ) -> String? {
+        let count = min(candidates.count, usableCount ?? candidates.count)
+        let index: Int
+        switch direction {
+        case .center:
+            index = 0
+        case .left:
+            index = 1
+        case .up:
+            index = 2
+        case .right:
+            index = 3
+        case .down:
+            index = 4
+        }
+
+        guard index < count else {
+            return nil
+        }
+        return candidates[index]
+    }
+
+    private func isEnglishAlphabetLabel(_ label: String) -> Bool {
+        guard label.isEmpty == false else {
+            return false
+        }
+
+        return label.unicodeScalars.allSatisfy { scalar in
+            (65...90).contains(Int(scalar.value))
+        }
+    }
+
     private func showFlickGuide(
         for key: KanaKey,
         from button: KeyboardButton,
@@ -1175,6 +1645,15 @@ final class KeyboardViewController: UIInputViewController {
         activeKanaButton = nil
     }
 
+    private func keyRequiringFlickTracking(from action: KeyAction) -> KanaKey? {
+        switch action {
+        case .kana(let key), .flickOnly(let key):
+            return key
+        default:
+            return nil
+        }
+    }
+
     private func flickGuideCandidates(for key: KanaKey) -> [FlickDirection: String] {
         var candidates: [FlickDirection: String] = [:]
         for direction in [FlickDirection.center, .left, .up, .right, .down] {
@@ -1194,6 +1673,11 @@ final class KeyboardViewController: UIInputViewController {
         for view in candidateStack.arrangedSubviews {
             candidateStack.removeArrangedSubview(view)
             view.removeFromSuperview()
+        }
+
+        if mainKeyboardPanel == .emoji {
+            addCandidateButton(title: "絵文字辞書を準備中", committedText: nil, isEnabled: false)
+            return
         }
 
         guard isDirectMode == false else {
@@ -1343,6 +1827,164 @@ final class KeyboardViewController: UIInputViewController {
                 commitSelectedOrDefaultCandidate()
             }
         }
+    }
+
+    private func handleReverseCycleKey() {
+        guard canReverseCycle,
+              activeKeyCandidates.isEmpty == false else {
+            updateReverseCycleButtonState()
+            return
+        }
+
+        let nextIndex = (activeCandidateIndex - 1 + activeKeyCandidates.count) % activeKeyCandidates.count
+        activeCandidateIndex = nextIndex
+        let text = activeKeyCandidates[nextIndex]
+
+        if isDirectMode {
+            for _ in lastInsertedText {
+                textDocumentProxy.deleteBackward()
+            }
+            textDocumentProxy.insertText(text)
+        } else {
+            replacePreviousComposingCharacter(with: text)
+        }
+
+        lastInsertedText = text
+        lastInputDate = Date()
+        scheduleReverseCycleStateTimer()
+        updateReverseCycleButtonState()
+    }
+
+    private func handleSwitchModeKey() {
+        commitRenderedComposingTextAsTyped()
+        mainKeyboardPanel = .text
+
+        guard case .precomposition(var status) = inputStatus else {
+            inputStatus = .precomposition(PrecompositionStatus(
+                language: .japanese,
+                phase: .empty,
+                liveConversionEnabled: UserDefaults.standard.object(
+                    forKey: Self.liveConversionDefaultsKey
+                ) as? Bool ?? true,
+                displayMode: .liveCandidate
+            ))
+            rebuildMainKeyboardPanel()
+            updateModeSwitchButtonTitle()
+            updatePreedit()
+            return
+        }
+
+        switch status.language {
+        case .japanese:
+            status.language = .english
+            primaryLanguage = "en-US"
+        case .english:
+            status.language = .number
+            primaryLanguage = "en-US"
+        case .number:
+            status.language = .japanese
+            primaryLanguage = "ja-JP"
+        }
+
+        status.phase = .empty
+        status.displayMode = .liveCandidate
+        inputStatus = .precomposition(status)
+        rebuildMainKeyboardPanel()
+        updateModeSwitchButtonTitle()
+        updatePreedit()
+    }
+
+    private func handleEmojiKeyboardKey() {
+        commitRenderedComposingTextAsTyped()
+        mainKeyboardPanel = mainKeyboardPanel == .emoji ? .text : .emoji
+        rebuildMainKeyboardPanel()
+        updatePreedit()
+    }
+
+    private func handleTogglePreviousAlphabetCaseKey() {
+        if let previousCharacter = previousComposingCharacterBeforeCursor(),
+           let toggledCharacter = toggledAlphabetCase(for: previousCharacter) {
+            replacePreviousComposingCharacter(with: String(toggledCharacter))
+            return
+        }
+
+        if let previousCharacter = textDocumentProxy.documentContextBeforeInput?.last,
+           let toggledCharacter = toggledAlphabetCase(for: previousCharacter) {
+            textDocumentProxy.deleteBackward()
+            textDocumentProxy.insertText(String(toggledCharacter))
+        }
+    }
+
+    private func previousComposingCharacterBeforeCursor() -> Character? {
+        guard composingText.isEmpty == false, composingCursorPosition > 0 else {
+            return nil
+        }
+
+        let index = stringIndex(in: composingText, offset: composingCursorPosition - 1)
+        return composingText[index]
+    }
+
+    private func toggledAlphabetCase(for character: Character) -> Character? {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1 else {
+            return nil
+        }
+
+        let value = scalar.value
+        if (65...90).contains(Int(value)),
+           let toggledScalar = UnicodeScalar(value + 32) {
+            return Character(toggledScalar)
+        }
+
+        if (97...122).contains(Int(value)),
+           let toggledScalar = UnicodeScalar(value - 32) {
+            return Character(toggledScalar)
+        }
+
+        return nil
+    }
+
+    private func updateModeSwitchButtonTitle() {
+        let title: String
+        switch currentPrecompositionStatus?.language {
+        case .japanese, .none:
+            title = "ABC"
+        case .english:
+            title = "★123"
+        case .number:
+            title = "あいう"
+        }
+        modeSwitchButton?.updateTitle(title)
+    }
+
+    private var canReverseCycle: Bool {
+        guard activeKeyLabel != nil,
+              activeKeyCandidates.count > 1,
+              lastInsertedText.isEmpty == false,
+              let lastInputDate else {
+            return false
+        }
+
+        return Date().timeIntervalSince(lastInputDate) <= multiTapInterval
+    }
+
+    private func updateReverseCycleButtonState() {
+        reverseCycleButton?.setFunctionEnabled(canReverseCycle)
+    }
+
+    private func scheduleReverseCycleStateTimer() {
+        stopReverseCycleStateTimer()
+        guard canReverseCycle, let lastInputDate else {
+            updateReverseCycleButtonState()
+            return
+        }
+
+        let remainingInterval = max(0.01, multiTapInterval - Date().timeIntervalSince(lastInputDate))
+        let timer = Timer(timeInterval: remainingInterval, repeats: false) { [weak self] _ in
+            self?.updateReverseCycleButtonState()
+        }
+        reverseCycleStateTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func commitDefaultCandidate() {
@@ -1790,6 +2432,16 @@ final class KeyboardViewController: UIInputViewController {
         cursorRepeatTimer = nil
     }
 
+    private func stopReverseCycleStateTimer() {
+        reverseCycleStateTimer?.invalidate()
+        reverseCycleStateTimer = nil
+    }
+
+    private func stopKeyboardSwitchLongPressTimer() {
+        keyboardSwitchLongPressTimer?.invalidate()
+        keyboardSwitchLongPressTimer = nil
+    }
+
     private func handleCursorRepeat(for action: KeyAction) {
         switch action {
         case .moveLeft:
@@ -2105,7 +2757,10 @@ final class KeyboardViewController: UIInputViewController {
     private func resetMultiTapState() {
         activeKeyLabel = nil
         activeCandidateIndex = 0
+        activeKeyCandidates = []
         lastInsertedText = ""
         lastInputDate = nil
+        stopReverseCycleStateTimer()
+        updateReverseCycleButtonState()
     }
 }
