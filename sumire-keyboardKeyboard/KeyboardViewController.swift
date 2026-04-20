@@ -70,6 +70,7 @@ final class KeyboardViewController: UIInputViewController {
         case transform
         case reverseCycle
         case switchMode
+        case switchToJapanese
         case switchToEnglish
         case switchToNumber
         case emojiKeyboard
@@ -1039,9 +1040,10 @@ final class KeyboardViewController: UIInputViewController {
             let rowStack = UIStackView()
             rowStack.axis = .horizontal
             rowStack.alignment = .fill
-            rowStack.distribution = .fillEqually
+            rowStack.distribution = .fill
             rowStack.spacing = 6
 
+            var rowButtons: [(button: KeyboardButton, span: CGFloat)] = []
             for key in row {
                 let button = KeyboardButton(
                     title: key.title,
@@ -1060,12 +1062,28 @@ final class KeyboardViewController: UIInputViewController {
                     configureInputTargets(for: button)
                 }
                 rowStack.addArrangedSubview(button)
+                rowButtons.append((button, key.span))
             }
 
+            applyQWERTYSpans(rowButtons)
             keyboard.addArrangedSubview(rowStack)
         }
 
         return keyboard
+    }
+
+    private func applyQWERTYSpans(_ rowButtons: [(button: KeyboardButton, span: CGFloat)]) {
+        guard let reference = rowButtons.first,
+              reference.span > 0 else {
+            return
+        }
+
+        for entry in rowButtons.dropFirst() where entry.span > 0 {
+            entry.button.widthAnchor.constraint(
+                equalTo: reference.button.widthAnchor,
+                multiplier: entry.span / reference.span
+            ).isActive = true
+        }
     }
 
     private struct QWERTYKey {
@@ -1074,30 +1092,35 @@ final class KeyboardViewController: UIInputViewController {
         let symbolPointSize: CGFloat
         let action: KeyAction
         let style: ButtonStyle
+        let span: CGFloat
 
         init(
             title: String,
             action: KeyAction,
-            style: ButtonStyle = .kana
+            style: ButtonStyle = .kana,
+            span: CGFloat = 1
         ) {
             self.title = title
             self.systemImageName = nil
             self.symbolPointSize = 19
             self.action = action
             self.style = style
+            self.span = span
         }
 
         init(
             systemImageName: String,
             symbolPointSize: CGFloat = 19,
             action: KeyAction,
-            style: ButtonStyle = .function
+            style: ButtonStyle = .function,
+            span: CGFloat = 1
         ) {
             self.title = nil
             self.systemImageName = systemImageName
             self.symbolPointSize = symbolPointSize
             self.action = action
             self.style = style
+            self.span = span
         }
     }
 
@@ -1126,14 +1149,19 @@ final class KeyboardViewController: UIInputViewController {
             qwertyLetterKey("m"),
             QWERTYKey(title: "⌫", action: .delete, style: .function)
         ]
-        let fourthRow: [QWERTYKey] = [
+        var fourthRow: [QWERTYKey] = [
             QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
             QWERTYKey(title: "123", action: .qwertySwitchSymbols, style: .function),
             QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
-            QWERTYKey(title: "空白", action: .space, style: .kana),
-            QWERTYKey(title: ".", action: .qwertyText("."), style: .kana),
-            QWERTYKey(title: "Enter", action: .enter, style: .primary)
+            QWERTYKey(title: "空白", action: .space, style: .kana, span: 4),
+            QWERTYKey(title: "Enter", action: .enter, style: .primary, span: 2)
         ]
+        if currentSumireKeyboard.qwertyLanguage == .english {
+            fourthRow.insert(
+                QWERTYKey(title: ".", action: .qwertyText("."), style: .kana),
+                at: fourthRow.count - 1
+            )
+        }
 
         return [firstRow, secondRow, thirdRow, fourthRow]
     }
@@ -1155,8 +1183,8 @@ final class KeyboardViewController: UIInputViewController {
                 QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
                 QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
                 QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
-                QWERTYKey(title: "空白", action: .space, style: .kana),
-                QWERTYKey(title: "Enter", action: .enter, style: .primary)
+                QWERTYKey(title: "空白", action: .space, style: .kana, span: 5),
+                QWERTYKey(title: "Enter", action: .enter, style: .primary, span: 2)
             ]
         ]
     }
@@ -1178,8 +1206,8 @@ final class KeyboardViewController: UIInputViewController {
                 QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
                 QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
                 QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
-                QWERTYKey(title: "空白", action: .space, style: .kana),
-                QWERTYKey(title: "Enter", action: .enter, style: .primary)
+                QWERTYKey(title: "空白", action: .space, style: .kana, span: 5),
+                QWERTYKey(title: "Enter", action: .enter, style: .primary, span: 2)
             ]
         ]
     }
@@ -1190,7 +1218,22 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func qwertyTextKey(_ text: String) -> QWERTYKey {
-        QWERTYKey(title: text, action: .qwertyText(text))
+        QWERTYKey(title: qwertyDisplayText(for: text), action: .qwertyText(text))
+    }
+
+    private func qwertyDisplayText(for text: String) -> String {
+        guard currentSumireKeyboard.qwertyLanguage == .japanese else {
+            return text
+        }
+
+        switch text {
+        case ".":
+            return "。"
+        case ",":
+            return "、"
+        default:
+            return text
+        }
     }
 
     private var qwertyNormalModeTitle: String {
@@ -1582,25 +1625,27 @@ final class KeyboardViewController: UIInputViewController {
         column.distribution = .fillEqually
         column.spacing = 6
 
+        let flickModeLayout = usesFlickOnlyLayout
+        let language = currentPrecompositionStatus?.language ?? .japanese
         let reverseButton = KeyboardButton(
-            title: usesFlickOnlyJapaneseInput ? "ABC" : nil,
-            systemImageName: usesFlickOnlyJapaneseInput ? nil : "arrow.counterclockwise",
+            title: flickModeLayout ? primaryFlickModeSwitchTitle(for: language) : nil,
+            systemImageName: flickModeLayout ? nil : "arrow.counterclockwise",
             symbolPointSize: 16,
-            action: usesFlickOnlyJapaneseInput ? .switchToEnglish : .reverseCycle,
+            action: flickModeLayout ? primaryFlickModeSwitchAction(for: language) : .reverseCycle,
             style: .function
         )
-        if usesFlickOnlyJapaneseInput == false {
+        if flickModeLayout == false {
             reverseCycleButton = reverseButton
         }
         configureInputTargets(for: reverseButton)
         column.addArrangedSubview(reverseButton)
 
         let modeButton = KeyboardButton(
-            title: usesFlickOnlyJapaneseInput ? "123" : "ABC",
-            action: usesFlickOnlyJapaneseInput ? .switchToNumber : .switchMode,
+            title: flickModeLayout ? secondaryFlickModeSwitchTitle(for: language) : "ABC",
+            action: flickModeLayout ? secondaryFlickModeSwitchAction(for: language) : .switchMode,
             style: .function
         )
-        if usesFlickOnlyJapaneseInput == false {
+        if flickModeLayout == false {
             modeSwitchButton = modeButton
         }
         configureInputTargets(for: modeButton)
@@ -1627,10 +1672,45 @@ final class KeyboardViewController: UIInputViewController {
         return column
     }
 
-    private var usesFlickOnlyJapaneseInput: Bool {
+    private var usesFlickOnlyLayout: Bool {
         currentSumireKeyboard.kind == .japaneseFlick
-            && currentPrecompositionStatus?.language == .japanese
             && KeyboardSettings.japaneseFlickInputMode == .flick
+    }
+
+    private func primaryFlickModeSwitchTitle(for language: PrecompositionLanguage) -> String {
+        switch language {
+        case .japanese:
+            return "ABC"
+        case .english, .number:
+            return "あいう"
+        }
+    }
+
+    private func primaryFlickModeSwitchAction(for language: PrecompositionLanguage) -> KeyAction {
+        switch language {
+        case .japanese:
+            return .switchToEnglish
+        case .english, .number:
+            return .switchToJapanese
+        }
+    }
+
+    private func secondaryFlickModeSwitchTitle(for language: PrecompositionLanguage) -> String {
+        switch language {
+        case .japanese, .english:
+            return "123"
+        case .number:
+            return "ABC"
+        }
+    }
+
+    private func secondaryFlickModeSwitchAction(for language: PrecompositionLanguage) -> KeyAction {
+        switch language {
+        case .japanese, .english:
+            return .switchToNumber
+        case .number:
+            return .switchToEnglish
+        }
     }
 
     private func configureKeyboardSwitchTargets(for button: KeyboardButton) {
@@ -1837,6 +1917,9 @@ final class KeyboardViewController: UIInputViewController {
         case .switchMode:
             resetMultiTapState()
             handleSwitchModeKey()
+        case .switchToJapanese:
+            resetMultiTapState()
+            switchFlickLanguage(to: .japanese)
         case .switchToEnglish:
             resetMultiTapState()
             switchFlickLanguage(to: .english)
@@ -2332,7 +2415,9 @@ final class KeyboardViewController: UIInputViewController {
             return button.convert(button.bounds, to: view).contains(locationInView)
         }
 
-        setActiveQWERTYButton(hoveredButton ?? fallback)
+        if let hoveredButton {
+            setActiveQWERTYButton(hoveredButton)
+        }
     }
 
     private func isQWERTYSelectableAction(_ action: KeyAction) -> Bool {
@@ -2556,11 +2641,12 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        let inputText = qwertyInputText(from: text)
         if currentSumireKeyboard.qwertyLanguage == .english {
-            textDocumentProxy.insertText(text)
+            textDocumentProxy.insertText(inputText)
         } else {
             ensureJapanesePrecompositionStatus()
-            qwertyRawInput.append(contentsOf: normalizedQWERTYRawInput(from: text))
+            qwertyRawInput.append(contentsOf: normalizedQWERTYRawInput(from: inputText))
             setComposingText(romajiKanaText(from: qwertyRawInput))
         }
 
@@ -2571,6 +2657,17 @@ final class KeyboardViewController: UIInputViewController {
                 rebuildKeyboardLayout()
             }
         }
+    }
+
+    private func qwertyInputText(from text: String) -> String {
+        guard qwertyMode == .normal,
+              text.count == 1,
+              let scalar = text.unicodeScalars.first,
+              CharacterSet.letters.contains(scalar) else {
+            return text
+        }
+
+        return qwertyShiftEnabled || qwertyCapsLockEnabled ? text.uppercased() : text.lowercased()
     }
 
     private func handleQWERTYShiftKey() {
@@ -2646,24 +2743,26 @@ final class KeyboardViewController: UIInputViewController {
 
     private func normalizedQWERTYRawInput(from text: String) -> String {
         let halfWidthText = text.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? text
-        return halfWidthText.lowercased()
+        return halfWidthText
     }
 
     private func romajiKanaText(from rawInput: String) -> String {
         let input = normalizedQWERTYRawInput(from: rawInput)
+        let originalCharacters = Array(input)
+        let lookupCharacters = Array(input.lowercased())
         var output = ""
-        var index = input.startIndex
+        var index = 0
 
-        while index < input.endIndex {
-            let character = input[index]
+        while index < lookupCharacters.count {
+            let character = lookupCharacters[index]
 
             if character == "n" {
-                let nextIndex = input.index(after: index)
-                if nextIndex < input.endIndex {
-                    let nextCharacter = input[nextIndex]
+                let nextIndex = index + 1
+                if nextIndex < lookupCharacters.count {
+                    let nextCharacter = lookupCharacters[nextIndex]
                     if nextCharacter == "n" {
                         output.append("ん")
-                        index = input.index(after: nextIndex)
+                        index = nextIndex + 1
                         continue
                     }
 
@@ -2675,36 +2774,36 @@ final class KeyboardViewController: UIInputViewController {
                 }
             }
 
-            if shouldInsertSmallTsu(at: index, in: input) {
+            if shouldInsertSmallTsu(at: index, in: lookupCharacters) {
                 output.append("っ")
-                index = input.index(after: index)
+                index += 1
                 continue
             }
 
-            if let match = longestRomajiKanaMatch(in: input, from: index) {
+            if let match = longestRomajiKanaMatch(in: lookupCharacters, from: index) {
                 output.append(match.kana)
                 index = match.upperBound
                 continue
             }
 
-            output.append(fallbackJapaneseQWERTYText(for: character))
-            index = input.index(after: index)
+            output.append(fallbackJapaneseQWERTYText(for: originalCharacters[index]))
+            index += 1
         }
 
         return output
     }
 
     private func longestRomajiKanaMatch(
-        in input: String,
-        from index: String.Index
-    ) -> (kana: String, upperBound: String.Index)? {
-        let maxLength = min(Self.romajiKanaMaxKeyLength, input.distance(from: index, to: input.endIndex))
+        in input: [Character],
+        from index: Int
+    ) -> (kana: String, upperBound: Int)? {
+        let maxLength = min(Self.romajiKanaMaxKeyLength, input.count - index)
         guard maxLength > 0 else {
             return nil
         }
 
         for length in stride(from: maxLength, through: 1, by: -1) {
-            let upperBound = input.index(index, offsetBy: length)
+            let upperBound = index + length
             let key = String(input[index..<upperBound])
             if let kana = Self.romajiKanaMap[key] {
                 return (kana, upperBound)
@@ -2714,9 +2813,9 @@ final class KeyboardViewController: UIInputViewController {
         return nil
     }
 
-    private func shouldInsertSmallTsu(at index: String.Index, in input: String) -> Bool {
-        let nextIndex = input.index(after: index)
-        guard nextIndex < input.endIndex else {
+    private func shouldInsertSmallTsu(at index: Int, in input: [Character]) -> Bool {
+        let nextIndex = index + 1
+        guard nextIndex < input.count else {
             return false
         }
 
