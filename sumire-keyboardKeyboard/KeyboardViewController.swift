@@ -70,9 +70,15 @@ final class KeyboardViewController: UIInputViewController {
         case transform
         case reverseCycle
         case switchMode
+        case switchToEnglish
+        case switchToNumber
         case emojiKeyboard
         case togglePreviousAlphabetCase
         case nextKeyboard
+        case qwertyText(String)
+        case qwertyShift
+        case qwertySwitchSymbols
+        case qwertySwitchSymbolPage
         case delete
         case moveLeft
         case moveRight
@@ -94,6 +100,12 @@ final class KeyboardViewController: UIInputViewController {
     private enum MainKeyboardPanel: Equatable {
         case text
         case emoji
+    }
+
+    private enum QWERTYMode: Equatable {
+        case normal
+        case symbols
+        case moreSymbols
     }
 
     private enum PrecompositionPhase: Equatable {
@@ -750,6 +762,13 @@ final class KeyboardViewController: UIInputViewController {
     private var lastInsertedText = ""
     private var lastInputDate: Date?
     private var mainKeyboardPanel: MainKeyboardPanel = .text
+    private var sumireKeyboards = KeyboardSettings.keyboards
+    private var currentSumireKeyboard = KeyboardSettings.currentKeyboard
+    private var qwertyMode: QWERTYMode = .normal
+    private var qwertyShiftEnabled = false
+    private var qwertyCapsLockEnabled = false
+    private var lastQWERTYShiftTapDate: Date?
+    private var qwertyRawInput = ""
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
@@ -771,6 +790,7 @@ final class KeyboardViewController: UIInputViewController {
     private let keyboardStack = UIStackView()
     private let mainKeyboardContainer = UIView()
     private let flickGuideView = FlickGuideView()
+    private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
     private let multiTapInterval: TimeInterval = 1.1
@@ -778,6 +798,8 @@ final class KeyboardViewController: UIInputViewController {
     private var suppressNextButtonRelease = false
     private weak var activeKanaButton: KeyboardButton?
     private weak var spaceButton: KeyboardButton?
+    private weak var activeQWERTYButton: KeyboardButton?
+    private var qwertyButtons: [KeyboardButton] = []
     private var activeFlickDirection: FlickDirection = .center
     private var deleteRepeatTimer: Timer?
     private var cursorRepeatTimer: Timer?
@@ -786,6 +808,9 @@ final class KeyboardViewController: UIInputViewController {
     private weak var modeSwitchButton: KeyboardButton?
     private var keyboardSwitchLongPressTimer: Timer?
     private var shouldSuppressNextKeyboardTap = false
+    private weak var lastKeyboardSwitchButton: KeyboardButton?
+    private var lastKeyboardSwitchEvent: UIEvent?
+    private weak var keyboardSelectionOverlay: UIView?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
@@ -793,6 +818,8 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        _ = syncSumireKeyboardSettings()
+        configureInputStatusForCurrentSumireKeyboard()
         view.backgroundColor = KeyboardTheme.keyboardBackground
         view.clipsToBounds = false
         setupKeyboardLayout()
@@ -824,6 +851,7 @@ final class KeyboardViewController: UIInputViewController {
         stopCursorRepeat()
         stopReverseCycleStateTimer()
         stopKeyboardSwitchLongPressTimer()
+        hideKeyboardSelectionOverlay()
         commitRenderedComposingTextAsTyped()
     }
 
@@ -854,14 +882,7 @@ final class KeyboardViewController: UIInputViewController {
         keyboardStack.distribution = .fill
         keyboardStack.spacing = 6
 
-        let leftControlColumn = makeLeftControlColumn()
-        let controlColumn = makeControlColumn()
         mainKeyboardContainer.translatesAutoresizingMaskIntoConstraints = false
-        rebuildMainKeyboardPanel()
-
-        keyboardStack.addArrangedSubview(leftControlColumn)
-        keyboardStack.addArrangedSubview(mainKeyboardContainer)
-        keyboardStack.addArrangedSubview(controlColumn)
         contentStack.addArrangedSubview(candidateBar)
         contentStack.addArrangedSubview(keyboardStack)
         view.addSubview(contentStack)
@@ -876,11 +897,10 @@ final class KeyboardViewController: UIInputViewController {
             contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
             contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
 
-            candidateBar.heightAnchor.constraint(equalToConstant: 38),
-            leftControlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28),
-            controlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28)
+            candidateBar.heightAnchor.constraint(equalToConstant: 38)
         ])
 
+        rebuildKeyboardLayout()
         updateModeSwitchButtonTitle()
         updateReverseCycleButtonState()
     }
@@ -907,6 +927,45 @@ final class KeyboardViewController: UIInputViewController {
         ])
 
         return candidateScrollView
+    }
+
+    private func rebuildKeyboardLayout() {
+        NSLayoutConstraint.deactivate(keyboardLayoutConstraints)
+        keyboardLayoutConstraints.removeAll()
+
+        for arrangedSubview in keyboardStack.arrangedSubviews {
+            keyboardStack.removeArrangedSubview(arrangedSubview)
+            arrangedSubview.removeFromSuperview()
+        }
+
+        reverseCycleButton = nil
+        modeSwitchButton = nil
+        spaceButton = nil
+        activeQWERTYButton = nil
+        qwertyButtons.removeAll()
+
+        if currentSumireKeyboard.kind == .qwerty {
+            let qwertyPanel = mainKeyboardPanel == .emoji ? makeEmojiPlaceholderView() : makeQWERTYKeyboard()
+            keyboardStack.addArrangedSubview(qwertyPanel)
+        } else {
+            let leftControlColumn = makeLeftControlColumn()
+            let controlColumn = makeControlColumn()
+            rebuildMainKeyboardPanel()
+
+            keyboardStack.addArrangedSubview(leftControlColumn)
+            keyboardStack.addArrangedSubview(mainKeyboardContainer)
+            keyboardStack.addArrangedSubview(controlColumn)
+
+            keyboardLayoutConstraints = [
+                leftControlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28),
+                controlColumn.widthAnchor.constraint(equalTo: mainKeyboardContainer.widthAnchor, multiplier: 0.28)
+            ]
+            NSLayoutConstraint.activate(keyboardLayoutConstraints)
+        }
+
+        updateModeSwitchButtonTitle()
+        updateReverseCycleButtonState()
+        updateSpaceButtonTitle()
     }
 
     private func rebuildMainKeyboardPanel() {
@@ -968,6 +1027,432 @@ final class KeyboardViewController: UIInputViewController {
 
         return grid
     }
+
+    private func makeQWERTYKeyboard() -> UIStackView {
+        let keyboard = UIStackView()
+        keyboard.axis = .vertical
+        keyboard.alignment = .fill
+        keyboard.distribution = .fillEqually
+        keyboard.spacing = 6
+
+        for row in qwertyRows() {
+            let rowStack = UIStackView()
+            rowStack.axis = .horizontal
+            rowStack.alignment = .fill
+            rowStack.distribution = .fillEqually
+            rowStack.spacing = 6
+
+            for key in row {
+                let button = KeyboardButton(
+                    title: key.title,
+                    systemImageName: key.systemImageName,
+                    symbolPointSize: key.symbolPointSize,
+                    action: key.action,
+                    style: key.style
+                )
+                if case .space = key.action {
+                    spaceButton = button
+                }
+                qwertyButtons.append(button)
+                if case .nextKeyboard = key.action {
+                    configureKeyboardSwitchTargets(for: button)
+                } else {
+                    configureInputTargets(for: button)
+                }
+                rowStack.addArrangedSubview(button)
+            }
+
+            keyboard.addArrangedSubview(rowStack)
+        }
+
+        return keyboard
+    }
+
+    private struct QWERTYKey {
+        let title: String?
+        let systemImageName: String?
+        let symbolPointSize: CGFloat
+        let action: KeyAction
+        let style: ButtonStyle
+
+        init(
+            title: String,
+            action: KeyAction,
+            style: ButtonStyle = .kana
+        ) {
+            self.title = title
+            self.systemImageName = nil
+            self.symbolPointSize = 19
+            self.action = action
+            self.style = style
+        }
+
+        init(
+            systemImageName: String,
+            symbolPointSize: CGFloat = 19,
+            action: KeyAction,
+            style: ButtonStyle = .function
+        ) {
+            self.title = nil
+            self.systemImageName = systemImageName
+            self.symbolPointSize = symbolPointSize
+            self.action = action
+            self.style = style
+        }
+    }
+
+    private func qwertyRows() -> [[QWERTYKey]] {
+        switch qwertyMode {
+        case .normal:
+            return qwertyNormalRows()
+        case .symbols:
+            return qwertySymbolRows()
+        case .moreSymbols:
+            return qwertyMoreSymbolRows()
+        }
+    }
+
+    private func qwertyNormalRows() -> [[QWERTYKey]] {
+        let firstRow = "qwertyuiop".map { qwertyLetterKey(String($0)) }
+        let secondRow = "asdfghjkl".map { qwertyLetterKey(String($0)) }
+        let thirdRow: [QWERTYKey] = [
+            QWERTYKey(systemImageName: qwertyShiftIconName, action: .qwertyShift),
+            qwertyLetterKey("z"),
+            qwertyLetterKey("x"),
+            qwertyLetterKey("c"),
+            qwertyLetterKey("v"),
+            qwertyLetterKey("b"),
+            qwertyLetterKey("n"),
+            qwertyLetterKey("m"),
+            QWERTYKey(title: "⌫", action: .delete, style: .function)
+        ]
+        let fourthRow: [QWERTYKey] = [
+            QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
+            QWERTYKey(title: "123", action: .qwertySwitchSymbols, style: .function),
+            QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
+            QWERTYKey(title: "空白", action: .space, style: .kana),
+            QWERTYKey(title: ".", action: .qwertyText("."), style: .kana),
+            QWERTYKey(title: "Enter", action: .enter, style: .primary)
+        ]
+
+        return [firstRow, secondRow, thirdRow, fourthRow]
+    }
+
+    private func qwertySymbolRows() -> [[QWERTYKey]] {
+        [
+            "1234567890".map { qwertyTextKey(String($0)) },
+            ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""].map(qwertyTextKey),
+            [
+                QWERTYKey(title: "#+=", action: .qwertySwitchSymbolPage, style: .function),
+                qwertyTextKey("."),
+                qwertyTextKey(","),
+                qwertyTextKey("?"),
+                qwertyTextKey("!"),
+                qwertyTextKey("'"),
+                QWERTYKey(title: "⌫", action: .delete, style: .function)
+            ],
+            [
+                QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
+                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
+                QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
+                QWERTYKey(title: "空白", action: .space, style: .kana),
+                QWERTYKey(title: "Enter", action: .enter, style: .primary)
+            ]
+        ]
+    }
+
+    private func qwertyMoreSymbolRows() -> [[QWERTYKey]] {
+        [
+            ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="].map(qwertyTextKey),
+            ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "・"].map(qwertyTextKey),
+            [
+                QWERTYKey(title: "123", action: .qwertySwitchSymbolPage, style: .function),
+                qwertyTextKey("."),
+                qwertyTextKey(","),
+                qwertyTextKey("?"),
+                qwertyTextKey("!"),
+                qwertyTextKey("'"),
+                QWERTYKey(title: "⌫", action: .delete, style: .function)
+            ],
+            [
+                QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
+                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
+                QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
+                QWERTYKey(title: "空白", action: .space, style: .kana),
+                QWERTYKey(title: "Enter", action: .enter, style: .primary)
+            ]
+        ]
+    }
+
+    private func qwertyLetterKey(_ letter: String) -> QWERTYKey {
+        let displayedLetter = qwertyShiftEnabled || qwertyCapsLockEnabled ? letter.uppercased() : letter.lowercased()
+        return QWERTYKey(title: displayedLetter, action: .qwertyText(displayedLetter))
+    }
+
+    private func qwertyTextKey(_ text: String) -> QWERTYKey {
+        QWERTYKey(title: text, action: .qwertyText(text))
+    }
+
+    private var qwertyNormalModeTitle: String {
+        if currentSumireKeyboard.qwertyLanguage == .english {
+            return "ABC"
+        }
+        return "あいう"
+    }
+
+    private var qwertyShiftIconName: String {
+        if qwertyCapsLockEnabled {
+            return "capslock.fill"
+        }
+        return qwertyShiftEnabled ? "shift.fill" : "shift"
+    }
+
+    private static let romajiKanaMap: [String: String] = [
+        "-": "ー",
+        "~": "〜",
+        ".": "。",
+        ",": "、",
+        "z/": "・",
+        "z.": "…",
+        "z,": "‥",
+        "zh": "←",
+        "zj": "↓",
+        "zk": "↑",
+        "zl": "→",
+        "z-": "〜",
+        "z[": "『",
+        "z]": "』",
+        "[": "「",
+        "]": "」",
+
+        "a": "あ",
+        "i": "い",
+        "u": "う",
+        "e": "え",
+        "o": "お",
+
+        "ka": "か",
+        "ki": "き",
+        "ku": "く",
+        "ke": "け",
+        "ko": "こ",
+        "ca": "か",
+        "cu": "く",
+        "co": "こ",
+        "kya": "きゃ",
+        "kyi": "きぃ",
+        "kyu": "きゅ",
+        "kye": "きぇ",
+        "kyo": "きょ",
+
+        "ga": "が",
+        "gi": "ぎ",
+        "gu": "ぐ",
+        "ge": "げ",
+        "go": "ご",
+        "gya": "ぎゃ",
+        "gyi": "ぎぃ",
+        "gyu": "ぎゅ",
+        "gye": "ぎぇ",
+        "gyo": "ぎょ",
+
+        "sa": "さ",
+        "si": "し",
+        "su": "す",
+        "se": "せ",
+        "so": "そ",
+        "sha": "しゃ",
+        "shi": "し",
+        "shu": "しゅ",
+        "she": "しぇ",
+        "sho": "しょ",
+        "sya": "しゃ",
+        "syi": "しぃ",
+        "syu": "しゅ",
+        "sye": "しぇ",
+        "syo": "しょ",
+
+        "za": "ざ",
+        "zi": "じ",
+        "zu": "ず",
+        "ze": "ぜ",
+        "zo": "ぞ",
+        "ja": "じゃ",
+        "ji": "じ",
+        "ju": "じゅ",
+        "je": "じぇ",
+        "jo": "じょ",
+        "jya": "じゃ",
+        "jyi": "じぃ",
+        "jyu": "じゅ",
+        "jye": "じぇ",
+        "jyo": "じょ",
+        "zya": "じゃ",
+        "zyi": "じぃ",
+        "zyu": "じゅ",
+        "zye": "じぇ",
+        "zyo": "じょ",
+
+        "ta": "た",
+        "ti": "ち",
+        "tu": "つ",
+        "te": "て",
+        "to": "と",
+        "chi": "ち",
+        "tsu": "つ",
+        "cha": "ちゃ",
+        "chu": "ちゅ",
+        "che": "ちぇ",
+        "cho": "ちょ",
+        "tya": "ちゃ",
+        "tyi": "ちぃ",
+        "tyu": "ちゅ",
+        "tye": "ちぇ",
+        "tyo": "ちょ",
+        "tsa": "つぁ",
+        "tsi": "つぃ",
+        "tse": "つぇ",
+        "tso": "つぉ",
+
+        "da": "だ",
+        "di": "ぢ",
+        "du": "づ",
+        "de": "で",
+        "do": "ど",
+        "dya": "ぢゃ",
+        "dyi": "ぢぃ",
+        "dyu": "ぢゅ",
+        "dye": "ぢぇ",
+        "dyo": "ぢょ",
+
+        "na": "な",
+        "ni": "に",
+        "nu": "ぬ",
+        "ne": "ね",
+        "no": "の",
+        "nya": "にゃ",
+        "nyi": "にぃ",
+        "nyu": "にゅ",
+        "nye": "にぇ",
+        "nyo": "にょ",
+
+        "ha": "は",
+        "hi": "ひ",
+        "hu": "ふ",
+        "he": "へ",
+        "ho": "ほ",
+        "fu": "ふ",
+        "hya": "ひゃ",
+        "hyi": "ひぃ",
+        "hyu": "ひゅ",
+        "hye": "ひぇ",
+        "hyo": "ひょ",
+        "fa": "ふぁ",
+        "fi": "ふぃ",
+        "fe": "ふぇ",
+        "fo": "ふぉ",
+        "fya": "ふゃ",
+        "fyu": "ふゅ",
+        "fyo": "ふょ",
+
+        "ba": "ば",
+        "bi": "び",
+        "bu": "ぶ",
+        "be": "べ",
+        "bo": "ぼ",
+        "bya": "びゃ",
+        "byi": "びぃ",
+        "byu": "びゅ",
+        "bye": "びぇ",
+        "byo": "びょ",
+
+        "pa": "ぱ",
+        "pi": "ぴ",
+        "pu": "ぷ",
+        "pe": "ぺ",
+        "po": "ぽ",
+        "pya": "ぴゃ",
+        "pyi": "ぴぃ",
+        "pyu": "ぴゅ",
+        "pye": "ぴぇ",
+        "pyo": "ぴょ",
+
+        "ma": "ま",
+        "mi": "み",
+        "mu": "む",
+        "me": "め",
+        "mo": "も",
+        "mya": "みゃ",
+        "myi": "みぃ",
+        "myu": "みゅ",
+        "mye": "みぇ",
+        "myo": "みょ",
+
+        "ya": "や",
+        "yi": "い",
+        "yu": "ゆ",
+        "ye": "いぇ",
+        "yo": "よ",
+
+        "ra": "ら",
+        "ri": "り",
+        "ru": "る",
+        "re": "れ",
+        "ro": "ろ",
+        "rya": "りゃ",
+        "ryi": "りぃ",
+        "ryu": "りゅ",
+        "rye": "りぇ",
+        "ryo": "りょ",
+
+        "wa": "わ",
+        "wi": "うぃ",
+        "wu": "う",
+        "we": "うぇ",
+        "wo": "を",
+        "wha": "うぁ",
+        "whi": "うぃ",
+        "whu": "う",
+        "whe": "うぇ",
+        "who": "うぉ",
+
+        "va": "ゔぁ",
+        "vi": "ゔぃ",
+        "vu": "ゔ",
+        "ve": "ゔぇ",
+        "vo": "ゔぉ",
+        "vya": "ゔゃ",
+        "vyi": "ゔぃ",
+        "vyu": "ゔゅ",
+        "vye": "ゔぇ",
+        "vyo": "ゔょ",
+
+        "la": "ぁ",
+        "li": "ぃ",
+        "lu": "ぅ",
+        "le": "ぇ",
+        "lo": "ぉ",
+        "xa": "ぁ",
+        "xi": "ぃ",
+        "xu": "ぅ",
+        "xe": "ぇ",
+        "xo": "ぉ",
+        "lya": "ゃ",
+        "lyu": "ゅ",
+        "lyo": "ょ",
+        "xya": "ゃ",
+        "xyu": "ゅ",
+        "xyo": "ょ",
+        "ltu": "っ",
+        "xtu": "っ",
+        "ltsu": "っ",
+        "xtsu": "っ",
+        "lwa": "ゎ",
+        "xwa": "ゎ",
+        "nn": "ん"
+    ]
+
+    private static let romajiKanaMaxKeyLength = romajiKanaMap.keys.map(\.count).max() ?? 1
 
     private func currentKeyRows() -> [[KanaKey]] {
         guard let language = currentPrecompositionStatus?.language else {
@@ -1098,17 +1583,26 @@ final class KeyboardViewController: UIInputViewController {
         column.spacing = 6
 
         let reverseButton = KeyboardButton(
-            systemImageName: "arrow.counterclockwise",
+            title: usesFlickOnlyJapaneseInput ? "ABC" : nil,
+            systemImageName: usesFlickOnlyJapaneseInput ? nil : "arrow.counterclockwise",
             symbolPointSize: 16,
-            action: .reverseCycle,
+            action: usesFlickOnlyJapaneseInput ? .switchToEnglish : .reverseCycle,
             style: .function
         )
-        reverseCycleButton = reverseButton
+        if usesFlickOnlyJapaneseInput == false {
+            reverseCycleButton = reverseButton
+        }
         configureInputTargets(for: reverseButton)
         column.addArrangedSubview(reverseButton)
 
-        let modeButton = KeyboardButton(title: "ABC", action: .switchMode, style: .function)
-        modeSwitchButton = modeButton
+        let modeButton = KeyboardButton(
+            title: usesFlickOnlyJapaneseInput ? "123" : "ABC",
+            action: usesFlickOnlyJapaneseInput ? .switchToNumber : .switchMode,
+            style: .function
+        )
+        if usesFlickOnlyJapaneseInput == false {
+            modeSwitchButton = modeButton
+        }
         configureInputTargets(for: modeButton)
         column.addArrangedSubview(modeButton)
 
@@ -1133,6 +1627,12 @@ final class KeyboardViewController: UIInputViewController {
         return column
     }
 
+    private var usesFlickOnlyJapaneseInput: Bool {
+        currentSumireKeyboard.kind == .japaneseFlick
+            && currentPrecompositionStatus?.language == .japanese
+            && KeyboardSettings.japaneseFlickInputMode == .flick
+    }
+
     private func configureKeyboardSwitchTargets(for button: KeyboardButton) {
         button.addTarget(
             self,
@@ -1149,11 +1649,10 @@ final class KeyboardViewController: UIInputViewController {
             action: #selector(handleKeyboardSwitchTouchCancel(_:)),
             for: .touchCancel
         )
-        button.addTarget(
-            self,
-            action: #selector(handleInputModeList(from:with:)),
-            for: .allTouchEvents
-        )
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKeyboardSwitchLongPress(_:)))
+        longPress.minimumPressDuration = 0.35
+        longPress.cancelsTouchesInView = false
+        button.addGestureRecognizer(longPress)
     }
 
     private func makeControlColumn() -> UIStackView {
@@ -1246,6 +1745,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
+        if currentSumireKeyboard.kind == .qwerty, isQWERTYSelectableAction(sender.action) {
+            setActiveQWERTYButton(sender)
+            hideFlickGuide()
+            return
+        }
+
         guard keyRequiringFlickTracking(from: sender.action) != nil else {
             return
         }
@@ -1257,6 +1762,11 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDrag(_ sender: KeyboardButton, event: UIEvent) {
+        if currentSumireKeyboard.kind == .qwerty {
+            updateActiveQWERTYButton(from: event, fallback: sender)
+            return
+        }
+
         guard let key = keyRequiringFlickTracking(from: sender.action) else {
             return
         }
@@ -1283,6 +1793,7 @@ final class KeyboardViewController: UIInputViewController {
         stopDeleteRepeat()
         stopCursorRepeat()
         clearActiveKanaButton()
+        clearActiveQWERTYButton()
         activeFlickDirection = .center
         hideFlickGuide()
     }
@@ -1301,15 +1812,20 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleKeyRelease(_ sender: KeyboardButton, event: UIEvent) {
+        let releasedButton = currentSumireKeyboard.kind == .qwerty
+            ? (activeQWERTYButton ?? sender)
+            : sender
+
         if suppressNextButtonRelease {
             suppressNextButtonRelease = false
             clearActiveKanaButton()
+            clearActiveQWERTYButton()
             activeFlickDirection = .center
             hideFlickGuide()
             return
         }
 
-        switch sender.action {
+        switch releasedButton.action {
         case .kana(let key):
             insertCandidate(for: key, direction: activeFlickDirection)
         case .flickOnly(let key):
@@ -1321,6 +1837,12 @@ final class KeyboardViewController: UIInputViewController {
         case .switchMode:
             resetMultiTapState()
             handleSwitchModeKey()
+        case .switchToEnglish:
+            resetMultiTapState()
+            switchFlickLanguage(to: .english)
+        case .switchToNumber:
+            resetMultiTapState()
+            switchFlickLanguage(to: .number)
         case .emojiKeyboard:
             resetMultiTapState()
             handleEmojiKeyboardKey()
@@ -1329,8 +1851,19 @@ final class KeyboardViewController: UIInputViewController {
             handleTogglePreviousAlphabetCaseKey()
         case .nextKeyboard:
             resetMultiTapState()
-            commitRenderedComposingTextAsTyped()
-            advanceToNextInputMode()
+            handleNextKeyboardKey()
+        case .qwertyText(let text):
+            resetMultiTapState()
+            handleQWERTYTextKey(text)
+        case .qwertyShift:
+            resetMultiTapState()
+            handleQWERTYShiftKey()
+        case .qwertySwitchSymbols:
+            resetMultiTapState()
+            handleQWERTYSymbolsKey()
+        case .qwertySwitchSymbolPage:
+            resetMultiTapState()
+            handleQWERTYSymbolPageKey()
         case .delete:
             resetMultiTapState()
             handleDeleteKey()
@@ -1349,6 +1882,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         clearActiveKanaButton()
+        clearActiveQWERTYButton()
         activeFlickDirection = .center
         hideFlickGuide()
     }
@@ -1356,7 +1890,10 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func handleKeyboardSwitchTouchDown(_ sender: KeyboardButton, event: UIEvent) {
         resetMultiTapState()
         hideFlickGuide()
+        hideKeyboardSelectionOverlay()
         shouldSuppressNextKeyboardTap = false
+        lastKeyboardSwitchButton = sender
+        lastKeyboardSwitchEvent = event
         stopKeyboardSwitchLongPressTimer()
 
         let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
@@ -1371,16 +1908,44 @@ final class KeyboardViewController: UIInputViewController {
         stopKeyboardSwitchLongPressTimer()
         guard shouldSuppressNextKeyboardTap == false else {
             shouldSuppressNextKeyboardTap = false
+            lastKeyboardSwitchButton = nil
+            lastKeyboardSwitchEvent = nil
             return
         }
 
         commitRenderedComposingTextAsTyped()
-        advanceToNextInputMode()
+        if advanceToNextSumireKeyboardIfAvailable() == false {
+            advanceToNextInputMode()
+        }
+        lastKeyboardSwitchButton = nil
+        lastKeyboardSwitchEvent = nil
     }
 
     @objc private func handleKeyboardSwitchTouchCancel(_ sender: KeyboardButton) {
         stopKeyboardSwitchLongPressTimer()
         shouldSuppressNextKeyboardTap = false
+        lastKeyboardSwitchButton = nil
+        lastKeyboardSwitchEvent = nil
+    }
+
+    @objc private func handleKeyboardSwitchLongPress(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else {
+            return
+        }
+
+        shouldSuppressNextKeyboardTap = true
+        stopKeyboardSwitchLongPressTimer()
+        resetMultiTapState()
+        hideFlickGuide()
+        commitRenderedComposingTextAsTyped()
+
+        sumireKeyboards = KeyboardSettings.keyboards
+        if sumireKeyboards.count > 1 {
+            showKeyboardSelectionOverlay()
+        } else if let button = lastKeyboardSwitchButton,
+                  let event = lastKeyboardSwitchEvent {
+            handleInputModeList(from: button, with: event)
+        }
     }
 
     @objc private func commitCandidate(_ sender: CandidateButton) {
@@ -1657,6 +2222,136 @@ final class KeyboardViewController: UIInputViewController {
         activeKanaButton = nil
     }
 
+    private func setActiveQWERTYButton(_ button: KeyboardButton?) {
+        guard activeQWERTYButton !== button else {
+            button?.isHighlighted = true
+            return
+        }
+
+        activeQWERTYButton?.isHighlighted = false
+        activeQWERTYButton = button
+        button?.isHighlighted = true
+    }
+
+    private func clearActiveQWERTYButton() {
+        activeQWERTYButton?.isHighlighted = false
+        activeQWERTYButton = nil
+    }
+
+    private func showKeyboardSelectionOverlay() {
+        hideKeyboardSelectionOverlay()
+        sumireKeyboards = KeyboardSettings.keyboards
+        guard sumireKeyboards.count > 1 else {
+            return
+        }
+
+        let overlay = UIView()
+        overlay.backgroundColor = KeyboardTheme.popupBackground
+        overlay.layer.cornerRadius = 8
+        overlay.layer.borderWidth = 0.5
+        overlay.layer.borderColor = KeyboardTheme.popupStroke.resolvedColor(with: traitCollection).cgColor
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.alignment = .fill
+        stack.distribution = .fill
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        for keyboard in sumireKeyboards {
+            let button = CandidateButton()
+            button.configure(
+                title: keyboard.name,
+                committedText: keyboard.id,
+                isEnabled: true,
+                isSelected: keyboard.id == currentSumireKeyboard.id
+            )
+            button.addTarget(self, action: #selector(selectKeyboardFromOverlay(_:)), for: .touchUpInside)
+            stack.addArrangedSubview(button)
+        }
+
+        overlay.addSubview(stack)
+        view.addSubview(overlay)
+        keyboardSelectionOverlay = overlay
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 8),
+            stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -8),
+            stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -8),
+
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
+            overlay.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -8),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+            overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 260)
+        ])
+    }
+
+    private func hideKeyboardSelectionOverlay() {
+        keyboardSelectionOverlay?.removeFromSuperview()
+        keyboardSelectionOverlay = nil
+    }
+
+    @objc private func selectKeyboardFromOverlay(_ sender: CandidateButton) {
+        guard let keyboardID = sender.committedText,
+              let keyboard = KeyboardSettings.keyboards.first(where: { $0.id == keyboardID }) else {
+            hideKeyboardSelectionOverlay()
+            return
+        }
+
+        KeyboardSettings.currentKeyboardID = keyboard.id
+        currentSumireKeyboard = keyboard
+        hideKeyboardSelectionOverlay()
+        applyCurrentSumireKeyboard()
+    }
+
+    private func updateActiveQWERTYButton(from event: UIEvent, fallback: KeyboardButton) {
+        guard isQWERTYSelectableAction(fallback.action) else {
+            return
+        }
+
+        let locationInView: CGPoint
+        if let touch = event.allTouches?.first {
+            locationInView = touch.location(in: view)
+        } else {
+            locationInView = fallback.convert(
+                CGPoint(x: fallback.bounds.midX, y: fallback.bounds.midY),
+                to: view
+            )
+        }
+
+        let hoveredButton = qwertyButtons.first { button in
+            guard button.isHidden == false,
+                  button.alpha > 0.01,
+                  button.window != nil,
+                  isQWERTYSelectableAction(button.action) else {
+                return false
+            }
+
+            return button.convert(button.bounds, to: view).contains(locationInView)
+        }
+
+        setActiveQWERTYButton(hoveredButton ?? fallback)
+    }
+
+    private func isQWERTYSelectableAction(_ action: KeyAction) -> Bool {
+        switch action {
+        case .qwertyText,
+             .qwertyShift,
+             .qwertySwitchSymbols,
+             .qwertySwitchSymbolPage,
+             .delete,
+             .space,
+             .enter,
+             .emojiKeyboard,
+             .nextKeyboard:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func keyRequiringFlickTracking(from action: KeyAction) -> KanaKey? {
         switch action {
         case .kana(let key), .flickOnly(let key):
@@ -1766,6 +2461,14 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func handleDeleteKey() {
+        if currentSumireKeyboard.kind == .qwerty,
+           currentSumireKeyboard.qwertyLanguage == .japanese,
+           qwertyRawInput.isEmpty == false {
+            qwertyRawInput.removeLast()
+            setComposingText(romajiKanaText(from: qwertyRawInput))
+            return
+        }
+
         if isDirectMode || composingText.isEmpty {
             textDocumentProxy.deleteBackward()
             return
@@ -1841,6 +2544,217 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func handleNextKeyboardKey() {
+        commitRenderedComposingTextAsTyped()
+        if advanceToNextSumireKeyboardIfAvailable() == false {
+            advanceToNextInputMode()
+        }
+    }
+
+    private func handleQWERTYTextKey(_ text: String) {
+        guard text.isEmpty == false else {
+            return
+        }
+
+        if currentSumireKeyboard.qwertyLanguage == .english {
+            textDocumentProxy.insertText(text)
+        } else {
+            ensureJapanesePrecompositionStatus()
+            qwertyRawInput.append(contentsOf: normalizedQWERTYRawInput(from: text))
+            setComposingText(romajiKanaText(from: qwertyRawInput))
+        }
+
+        if qwertyMode == .normal, qwertyShiftEnabled {
+            if qwertyCapsLockEnabled == false {
+                qwertyShiftEnabled = false
+                lastQWERTYShiftTapDate = nil
+                rebuildKeyboardLayout()
+            }
+        }
+    }
+
+    private func handleQWERTYShiftKey() {
+        guard currentSumireKeyboard.kind == .qwerty,
+              qwertyMode == .normal else {
+            return
+        }
+
+        let now = Date()
+        if qwertyCapsLockEnabled {
+            qwertyCapsLockEnabled = false
+            qwertyShiftEnabled = false
+            lastQWERTYShiftTapDate = nil
+        } else if let lastQWERTYShiftTapDate,
+                  now.timeIntervalSince(lastQWERTYShiftTapDate) <= 0.35 {
+            qwertyCapsLockEnabled = true
+            qwertyShiftEnabled = true
+            self.lastQWERTYShiftTapDate = nil
+        } else {
+            qwertyShiftEnabled.toggle()
+            lastQWERTYShiftTapDate = now
+        }
+        rebuildKeyboardLayout()
+    }
+
+    private func handleQWERTYSymbolsKey() {
+        guard currentSumireKeyboard.kind == .qwerty else {
+            return
+        }
+
+        qwertyMode = qwertyMode == .normal ? .symbols : .normal
+        qwertyShiftEnabled = false
+        qwertyCapsLockEnabled = false
+        lastQWERTYShiftTapDate = nil
+        mainKeyboardPanel = .text
+        rebuildKeyboardLayout()
+        updatePreedit()
+    }
+
+    private func handleQWERTYSymbolPageKey() {
+        guard currentSumireKeyboard.kind == .qwerty else {
+            return
+        }
+
+        qwertyMode = qwertyMode == .moreSymbols ? .symbols : .moreSymbols
+        qwertyShiftEnabled = false
+        qwertyCapsLockEnabled = false
+        lastQWERTYShiftTapDate = nil
+        mainKeyboardPanel = .text
+        rebuildKeyboardLayout()
+    }
+
+    private func fullWidthText(from text: String) -> String {
+        var output = ""
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x20:
+                output.append("　")
+            case 0x21...0x7E:
+                if let fullWidthScalar = UnicodeScalar(scalar.value + 0xFEE0) {
+                    output.append(String(fullWidthScalar))
+                } else {
+                    output.append(String(scalar))
+                }
+            case 0x00A5:
+                output.append("￥")
+            default:
+                output.append(String(scalar))
+            }
+        }
+        return output
+    }
+
+    private func normalizedQWERTYRawInput(from text: String) -> String {
+        let halfWidthText = text.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? text
+        return halfWidthText.lowercased()
+    }
+
+    private func romajiKanaText(from rawInput: String) -> String {
+        let input = normalizedQWERTYRawInput(from: rawInput)
+        var output = ""
+        var index = input.startIndex
+
+        while index < input.endIndex {
+            let character = input[index]
+
+            if character == "n" {
+                let nextIndex = input.index(after: index)
+                if nextIndex < input.endIndex {
+                    let nextCharacter = input[nextIndex]
+                    if nextCharacter == "n" {
+                        output.append("ん")
+                        index = input.index(after: nextIndex)
+                        continue
+                    }
+
+                    if isRomajiConsonant(nextCharacter), nextCharacter != "y" {
+                        output.append("ん")
+                        index = nextIndex
+                        continue
+                    }
+                }
+            }
+
+            if shouldInsertSmallTsu(at: index, in: input) {
+                output.append("っ")
+                index = input.index(after: index)
+                continue
+            }
+
+            if let match = longestRomajiKanaMatch(in: input, from: index) {
+                output.append(match.kana)
+                index = match.upperBound
+                continue
+            }
+
+            output.append(fallbackJapaneseQWERTYText(for: character))
+            index = input.index(after: index)
+        }
+
+        return output
+    }
+
+    private func longestRomajiKanaMatch(
+        in input: String,
+        from index: String.Index
+    ) -> (kana: String, upperBound: String.Index)? {
+        let maxLength = min(Self.romajiKanaMaxKeyLength, input.distance(from: index, to: input.endIndex))
+        guard maxLength > 0 else {
+            return nil
+        }
+
+        for length in stride(from: maxLength, through: 1, by: -1) {
+            let upperBound = input.index(index, offsetBy: length)
+            let key = String(input[index..<upperBound])
+            if let kana = Self.romajiKanaMap[key] {
+                return (kana, upperBound)
+            }
+        }
+
+        return nil
+    }
+
+    private func shouldInsertSmallTsu(at index: String.Index, in input: String) -> Bool {
+        let nextIndex = input.index(after: index)
+        guard nextIndex < input.endIndex else {
+            return false
+        }
+
+        let character = input[index]
+        let nextCharacter = input[nextIndex]
+        return character == nextCharacter
+            && character != "n"
+            && isRomajiConsonant(character)
+    }
+
+    private func isRomajiConsonant(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1 else {
+            return false
+        }
+
+        return (97...122).contains(Int(scalar.value)) && "aiueo".contains(character) == false
+    }
+
+    private func fallbackJapaneseQWERTYText(for character: Character) -> String {
+        switch character {
+        case "-":
+            return "ー"
+        case "~":
+            return "〜"
+        case ".":
+            return "。"
+        case ",":
+            return "、"
+        case "[":
+            return "「"
+        case "]":
+            return "」"
+        default:
+            return fullWidthText(from: String(character))
+        }
+    }
+
     private func handleReverseCycleKey() {
         guard canReverseCycle,
               activeKeyCandidates.isEmpty == false else {
@@ -1878,7 +2792,7 @@ final class KeyboardViewController: UIInputViewController {
                 liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
                 displayMode: .liveCandidate
             ))
-            rebuildMainKeyboardPanel()
+            rebuildKeyboardLayout()
             updateModeSwitchButtonTitle()
             updatePreedit()
             return
@@ -1899,15 +2813,33 @@ final class KeyboardViewController: UIInputViewController {
         status.phase = .empty
         status.displayMode = .liveCandidate
         inputStatus = .precomposition(status)
-        rebuildMainKeyboardPanel()
+        rebuildKeyboardLayout()
         updateModeSwitchButtonTitle()
+        updatePreedit()
+    }
+
+    private func switchFlickLanguage(to language: PrecompositionLanguage) {
+        commitRenderedComposingTextAsTyped()
+        mainKeyboardPanel = .text
+        inputStatus = .precomposition(PrecompositionStatus(
+            language: language,
+            phase: .empty,
+            liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
+            displayMode: .liveCandidate
+        ))
+        primaryLanguage = language == .japanese ? "ja-JP" : "en-US"
+        rebuildKeyboardLayout()
         updatePreedit()
     }
 
     private func handleEmojiKeyboardKey() {
         commitRenderedComposingTextAsTyped()
         mainKeyboardPanel = mainKeyboardPanel == .emoji ? .text : .emoji
-        rebuildMainKeyboardPanel()
+        if currentSumireKeyboard.kind == .qwerty {
+            rebuildKeyboardLayout()
+        } else {
+            rebuildMainKeyboardPanel()
+        }
         updatePreedit()
     }
 
@@ -2030,6 +2962,20 @@ final class KeyboardViewController: UIInputViewController {
         return nil
     }
 
+    private func ensureJapanesePrecompositionStatus() {
+        guard case .precomposition(let status) = inputStatus,
+              status.language == .japanese else {
+            inputStatus = .precomposition(PrecompositionStatus(
+                language: .japanese,
+                phase: composingText.isEmpty ? .empty : .composing,
+                liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
+                displayMode: .liveCandidate
+            ))
+            primaryLanguage = "ja-JP"
+            return
+        }
+    }
+
     private func currentSelectedCandidateIndex(candidateCount: Int) -> Int? {
         guard candidateCount > 0,
               case .precomposition(let status) = inputStatus,
@@ -2072,20 +3018,99 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func syncSharedSettings() {
-        guard case .precomposition(var status) = inputStatus else {
-            return
-        }
+        let shouldApplyKeyboard = syncSumireKeyboardSettings()
 
         let nextLiveConversionEnabled = KeyboardSettings.liveConversionEnabled
-        guard status.liveConversionEnabled != nextLiveConversionEnabled else {
+        var shouldRenderComposition = false
+        if case .precomposition(var status) = inputStatus,
+           status.liveConversionEnabled != nextLiveConversionEnabled {
+            status.liveConversionEnabled = nextLiveConversionEnabled
+            status.displayMode = nextLiveConversionEnabled ? .liveCandidate : .reading
+            inputStatus = .precomposition(status)
+            shouldRenderComposition = true
+        }
+
+        if shouldApplyKeyboard {
+            applyCurrentSumireKeyboard()
             return
         }
 
-        status.liveConversionEnabled = nextLiveConversionEnabled
-        status.displayMode = nextLiveConversionEnabled ? .liveCandidate : .reading
-        inputStatus = .precomposition(status)
-        renderCurrentComposingText()
+        if shouldRenderComposition {
+            renderCurrentComposingText()
+            updatePreedit()
+        }
+    }
+
+    private func syncSumireKeyboardSettings() -> Bool {
+        let nextKeyboards = KeyboardSettings.keyboards
+        let nextKeyboardID = KeyboardSettings.currentKeyboardID
+        let nextKeyboard = nextKeyboards.first(where: { $0.id == nextKeyboardID }) ?? nextKeyboards[0]
+        let shouldApplyKeyboard = currentSumireKeyboard.id != nextKeyboard.id
+            || currentSumireKeyboard.kind != nextKeyboard.kind
+            || currentSumireKeyboard.qwertyLanguage != nextKeyboard.qwertyLanguage
+
+        sumireKeyboards = nextKeyboards
+        currentSumireKeyboard = nextKeyboard
+        return shouldApplyKeyboard
+    }
+
+    private func advanceToNextSumireKeyboardIfAvailable() -> Bool {
+        sumireKeyboards = KeyboardSettings.keyboards
+        guard sumireKeyboards.count > 1 else {
+            return false
+        }
+
+        let currentID = KeyboardSettings.currentKeyboardID
+        let currentIndex = sumireKeyboards.firstIndex(where: { $0.id == currentID }) ?? 0
+        let nextIndex = (currentIndex + 1) % sumireKeyboards.count
+        currentSumireKeyboard = sumireKeyboards[nextIndex]
+        KeyboardSettings.currentKeyboardID = currentSumireKeyboard.id
+        applyCurrentSumireKeyboard()
+        return true
+    }
+
+    private func applyCurrentSumireKeyboard() {
+        commitRenderedComposingTextAsTyped()
+        resetMultiTapState()
+        hideKeyboardSelectionOverlay()
+        lastKeyboardSwitchButton = nil
+        lastKeyboardSwitchEvent = nil
+        mainKeyboardPanel = .text
+        qwertyMode = .normal
+        qwertyShiftEnabled = false
+        qwertyCapsLockEnabled = false
+        lastQWERTYShiftTapDate = nil
+        qwertyRawInput = ""
+
+        configureInputStatusForCurrentSumireKeyboard()
+        rebuildKeyboardLayout()
         updatePreedit()
+    }
+
+    private func configureInputStatusForCurrentSumireKeyboard() {
+        switch currentSumireKeyboard.kind {
+        case .japaneseFlick:
+            inputStatus = .precomposition(PrecompositionStatus(
+                language: .japanese,
+                phase: .empty,
+                liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
+                displayMode: .liveCandidate
+            ))
+            primaryLanguage = "ja-JP"
+        case .qwerty:
+            if currentSumireKeyboard.qwertyLanguage == .english {
+                inputStatus = .direct
+                primaryLanguage = "en-US"
+            } else {
+                inputStatus = .precomposition(PrecompositionStatus(
+                    language: .japanese,
+                    phase: .empty,
+                    liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
+                    displayMode: .liveCandidate
+                ))
+                primaryLanguage = "ja-JP"
+            }
+        }
     }
 
     private func syncPrecompositionPhaseForCurrentText() {
@@ -2194,6 +3219,8 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        qwertyRawInput = ""
+
         let activeRange = normalizedConversionRange()
         guard activeRange.isEmpty == false else {
             return
@@ -2227,9 +3254,11 @@ final class KeyboardViewController: UIInputViewController {
 
     private func commitRenderedComposingTextAsTyped() {
         guard composingText.isEmpty == false else {
+            qwertyRawInput = ""
             return
         }
 
+        qwertyRawInput = ""
         composingText = ""
         renderedComposingText = ""
         composingCursorPosition = 0
