@@ -753,7 +753,7 @@ final class KeyboardViewController: UIInputViewController {
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
-        liveConversionEnabled: UserDefaults.standard.object(forKey: KeyboardViewController.liveConversionDefaultsKey) as? Bool ?? true,
+        liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
         displayMode: .liveCandidate
     ))
     private var composingText = ""
@@ -789,7 +789,6 @@ final class KeyboardViewController: UIInputViewController {
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
-    private static let liveConversionDefaultsKey = "SumireKeyboardLiveConversionEnabled"
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -810,6 +809,11 @@ final class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         scheduleKanaKanjiConverterLoad(delay: 0.25)
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        syncSharedSettings()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1472,7 +1476,8 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         let now = Date()
-        let shouldCycle = activeKeyLabel == key.label
+        let shouldCycle = canUseToggleInput(for: key)
+            && activeKeyLabel == key.label
             && lastInsertedText.isEmpty == false
             && lastInputDate.map { now.timeIntervalSince($0) <= multiTapInterval } == true
 
@@ -1482,9 +1487,8 @@ final class KeyboardViewController: UIInputViewController {
             activeKeyLabel = key.label
             activeCandidateIndex = 0
         }
-        activeKeyCandidates = key.candidates
-
         let text = key.candidates[activeCandidateIndex]
+        activeKeyCandidates = canUseToggleInput(for: key) ? key.candidates : [text]
         if isDirectMode {
             if shouldCycle {
                 for _ in lastInsertedText {
@@ -1503,6 +1507,14 @@ final class KeyboardViewController: UIInputViewController {
         lastInputDate = now
         scheduleReverseCycleStateTimer()
         updateReverseCycleButtonState()
+    }
+
+    private func canUseToggleInput(for key: KanaKey) -> Bool {
+        guard currentPrecompositionStatus?.language == .japanese else {
+            return true
+        }
+
+        return KeyboardSettings.japaneseFlickInputMode == .toggle
     }
 
     private func insertFlickOnlyCandidate(for key: KanaKey, direction: FlickDirection) {
@@ -1791,16 +1803,16 @@ final class KeyboardViewController: UIInputViewController {
     private func handleSpaceKey() {
         switch inputStatus {
         case .direct:
-            textDocumentProxy.insertText(" ")
+            textDocumentProxy.insertText(KeyboardSettings.spaceText)
         case .precomposition(let status):
             guard composingText.isEmpty == false else {
-                textDocumentProxy.insertText(" ")
+                textDocumentProxy.insertText(KeyboardSettings.spaceText)
                 return
             }
 
             if status.language == .japanese {
                 guard canUseSpaceAsConversionKey else {
-                    insertText(" ")
+                    insertText(KeyboardSettings.spaceText)
                     return
                 }
 
@@ -1811,7 +1823,7 @@ final class KeyboardViewController: UIInputViewController {
                     enterConversionMode()
                 }
             } else {
-                insertText(" ")
+                insertText(KeyboardSettings.spaceText)
             }
         }
     }
@@ -1863,9 +1875,7 @@ final class KeyboardViewController: UIInputViewController {
             inputStatus = .precomposition(PrecompositionStatus(
                 language: .japanese,
                 phase: .empty,
-                liveConversionEnabled: UserDefaults.standard.object(
-                    forKey: Self.liveConversionDefaultsKey
-                ) as? Bool ?? true,
+                liveConversionEnabled: KeyboardSettings.liveConversionEnabled,
                 displayMode: .liveCandidate
             ))
             rebuildMainKeyboardPanel()
@@ -2056,7 +2066,24 @@ final class KeyboardViewController: UIInputViewController {
         status.liveConversionEnabled = isEnabled
         status.displayMode = isEnabled ? .liveCandidate : .reading
         inputStatus = .precomposition(status)
-        UserDefaults.standard.set(isEnabled, forKey: Self.liveConversionDefaultsKey)
+        KeyboardSettings.liveConversionEnabled = isEnabled
+        renderCurrentComposingText()
+        updatePreedit()
+    }
+
+    private func syncSharedSettings() {
+        guard case .precomposition(var status) = inputStatus else {
+            return
+        }
+
+        let nextLiveConversionEnabled = KeyboardSettings.liveConversionEnabled
+        guard status.liveConversionEnabled != nextLiveConversionEnabled else {
+            return
+        }
+
+        status.liveConversionEnabled = nextLiveConversionEnabled
+        status.displayMode = nextLiveConversionEnabled ? .liveCandidate : .reading
+        inputStatus = .precomposition(status)
         renderCurrentComposingText()
         updatePreedit()
     }

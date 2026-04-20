@@ -8,75 +8,72 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(
+        KeyboardSettings.Keys.japaneseFlickInputMode,
+        store: KeyboardSettings.defaults
+    )
+    private var japaneseFlickInputModeRawValue = KeyboardSettings.JapaneseFlickInputMode.toggle.rawValue
 
-    private let keyRows: [[String]] = [
-        ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
-        ["A", "S", "D", "F", "G", "H", "J", "K", "L"],
-        ["Z", "X", "C", "V", "B", "N", "M"]
-    ]
+    @AppStorage(
+        KeyboardSettings.Keys.liveConversionEnabled,
+        store: KeyboardSettings.defaults
+    )
+    private var liveConversionEnabled = true
 
-    private var keyBackground: Color {
-        colorScheme == .dark
-            ? Color(red: 0.25, green: 0.25, blue: 0.27)
-            : .white
-    }
+    @AppStorage(
+        KeyboardSettings.Keys.usesHalfWidthSpace,
+        store: KeyboardSettings.defaults
+    )
+    private var usesHalfWidthSpace = false
 
-    private var functionKeyBackground: Color {
-        colorScheme == .dark
-            ? Color(red: 0.18, green: 0.19, blue: 0.21)
-            : Color.gray.opacity(0.2)
+    private var japaneseFlickInputMode: Binding<KeyboardSettings.JapaneseFlickInputMode> {
+        Binding(
+            get: {
+                KeyboardSettings.JapaneseFlickInputMode(
+                    rawValue: japaneseFlickInputModeRawValue
+                ) ?? .toggle
+            },
+            set: { nextMode in
+                japaneseFlickInputModeRawValue = nextMode.rawValue
+            }
+        )
     }
 
     var body: some View {
-        VStack(spacing: 18) {
-            Text("Sumire Keyboard")
-                .font(.title2.weight(.semibold))
-
-            Text("ダミー表示（入力処理は未実装）")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            VStack(spacing: 10) {
-                ForEach(keyRows, id: \.self) { row in
-                    HStack(spacing: 8) {
-                        ForEach(row, id: \.self) { key in
-                            Text(key)
-                                .font(.headline)
-                                .frame(width: 30, height: 42)
-                                .background(keyBackground)
-                                .cornerRadius(8)
-                                .shadow(color: .black.opacity(0.08), radius: 1, x: 0, y: 1)
+        NavigationStack {
+            Form {
+                Section("日本語 Flick") {
+                    Picker("入力モード", selection: japaneseFlickInputMode) {
+                        ForEach(KeyboardSettings.JapaneseFlickInputMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
                         }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text("フリックモードでは、同じキーの連打で「あ」から「い」へ進む Toggle 入力を無効にします。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("変換") {
+                    Toggle("Live Conversion", isOn: $liveConversionEnabled)
+
+                    Toggle("Space キーで半角スペースを入力", isOn: $usesHalfWidthSpace)
+
+                    LabeledContent("現在の Space") {
+                        Text(usesHalfWidthSpace ? "半角" : "全角")
+                            .foregroundStyle(.secondary)
                     }
                 }
 
-                HStack(spacing: 8) {
-                    Text("123")
-                        .frame(width: 52, height: 42)
-                        .background(functionKeyBackground)
-                        .cornerRadius(8)
-
-                    Text("space")
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 42)
-                        .background(keyBackground)
-                        .cornerRadius(8)
-
-                    Text("return")
-                        .frame(width: 72, height: 42)
-                        .background(Color.blue.opacity(0.15))
-                        .cornerRadius(8)
+                Section("共有設定") {
+                    Text("設定をキーボードへ反映するには、iOS の設定で Sumire Keyboard の「フルアクセスを許可」をオンにしてください。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(12)
-            .background(Color.gray.opacity(0.12))
-            .cornerRadius(14)
-
-            Spacer(minLength: 0)
+            .navigationTitle("Sumire Keyboard")
         }
-        .padding()
-        .background(Color(.systemGroupedBackground))
     }
 }
 

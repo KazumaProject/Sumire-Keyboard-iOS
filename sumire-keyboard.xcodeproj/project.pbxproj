@@ -61,6 +61,11 @@
 			path = "sumire-keyboard";
 			sourceTree = "<group>";
 		};
+		C00000000000000000000001 /* sumire-keyboardShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "sumire-keyboardShared";
+			sourceTree = "<group>";
+		};
 		A4EBDFB42F93627000764A31 /* sumire-keyboardTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "sumire-keyboardTests";
@@ -114,6 +119,7 @@
 			isa = PBXGroup;
 			children = (
 				A4EBDFA62F93626E00764A31 /* sumire-keyboard */,
+				C00000000000000000000001 /* sumire-keyboardShared */,
 				B10000000000000000000005 /* sumire-keyboardKeyboard */,
 				A4EBDFB42F93627000764A31 /* sumire-keyboardTests */,
 				A4EBDFBE2F93627000764A31 /* sumire-keyboardUITests */,
@@ -151,6 +157,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A4EBDFA62F93626E00764A31 /* sumire-keyboard */,
+				C00000000000000000000001 /* sumire-keyboardShared */,
 			);
 			name = "sumire-keyboard";
 			packageProductDependencies = (
@@ -219,6 +226,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				B10000000000000000000005 /* sumire-keyboardKeyboard */,
+				C00000000000000000000001 /* sumire-keyboardShared */,
 			);
 			name = "sumire-keyboardKeyboard";
 			packageProductDependencies = (
@@ -482,6 +490,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "sumire-keyboard/sumire-keyboard.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = CR44666U73;
@@ -514,6 +523,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "sumire-keyboard/sumire-keyboard.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = CR44666U73;
@@ -629,6 +639,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = "sumire-keyboardKeyboard/sumire-keyboardKeyboard.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = CR44666U73;
@@ -657,6 +668,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = "sumire-keyboardKeyboard/sumire-keyboardKeyboard.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = CR44666U73;
