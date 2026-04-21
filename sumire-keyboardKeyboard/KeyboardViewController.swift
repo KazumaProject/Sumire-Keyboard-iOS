@@ -32,10 +32,8 @@ final class KeyboardViewController: UIInputViewController {
                 : .systemGray2
         }
 
-        static let candidateBackground = UIColor { traits in
-            traits.userInterfaceStyle == .dark
-                ? UIColor(red: 0.20, green: 0.20, blue: 0.22, alpha: 1)
-                : .white
+        static let candidateBackground = UIColor { _ in
+            .clear
         }
 
         static let popupBackground = UIColor { traits in
@@ -166,10 +164,15 @@ final class KeyboardViewController: UIInputViewController {
             configuration.baseBackgroundColor = style.backgroundColor
             configuration.baseForegroundColor = style.foregroundColor
             configuration.cornerStyle = .medium
+            configuration.titleLineBreakMode = .byTruncatingTail
             configuration.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 6, bottom: 8, trailing: 6)
 
             self.configuration = configuration
             titleLabel?.font = style.font
+            titleLabel?.adjustsFontSizeToFitWidth = true
+            titleLabel?.minimumScaleFactor = 0.62
+            titleLabel?.numberOfLines = 1
+            titleLabel?.lineBreakMode = .byTruncatingTail
             layer.cornerRadius = 8
             layer.shadowColor = UIColor.black.cgColor
             layer.shadowOpacity = style.shadowOpacity
@@ -310,8 +313,8 @@ final class KeyboardViewController: UIInputViewController {
             setContentHuggingPriority(.required, for: .horizontal)
             setContentCompressionResistancePriority(.required, for: .horizontal)
             layer.cornerRadius = 8
-            layer.borderWidth = 0.5
-            layer.borderColor = UIColor.separator.withAlphaComponent(0.16).cgColor
+            layer.borderWidth = 0
+            layer.borderColor = UIColor.clear.cgColor
             translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -346,10 +349,10 @@ final class KeyboardViewController: UIInputViewController {
             newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
             newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
             self.configuration = newConfiguration
-            layer.borderColor = UIColor.separator
-                .withAlphaComponent(traitCollection.userInterfaceStyle == .dark ? 0.28 : 0.16)
-                .resolvedColor(with: traitCollection)
-                .cgColor
+            layer.borderWidth = isSelected ? 0.5 : 0
+            layer.borderColor = isSelected
+                ? UIColor.systemBlue.resolvedColor(with: traitCollection).cgColor
+                : UIColor.clear.cgColor
         }
     }
 
@@ -1124,6 +1127,11 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private struct RomajiKanaSegment {
+        let rawLength: Int
+        let output: String
+    }
+
     private func qwertyRows() -> [[QWERTYKey]] {
         switch qwertyMode {
         case .normal:
@@ -1181,7 +1189,7 @@ final class KeyboardViewController: UIInputViewController {
             ],
             [
                 QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
-                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
+                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function, span: 1.35),
                 QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
                 QWERTYKey(title: "空白", action: .space, style: .kana, span: 5),
                 QWERTYKey(title: "Enter", action: .enter, style: .primary, span: 2)
@@ -1204,7 +1212,7 @@ final class KeyboardViewController: UIInputViewController {
             ],
             [
                 QWERTYKey(systemImageName: "globe", symbolPointSize: 18, action: .nextKeyboard),
-                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function),
+                QWERTYKey(title: qwertyNormalModeTitle, action: .qwertySwitchSymbols, style: .function, span: 1.35),
                 QWERTYKey(systemImageName: "face.smiling", symbolPointSize: 18, action: .emojiKeyboard),
                 QWERTYKey(title: "空白", action: .space, style: .kana, span: 5),
                 QWERTYKey(title: "Enter", action: .enter, style: .primary, span: 2)
@@ -2549,8 +2557,7 @@ final class KeyboardViewController: UIInputViewController {
         if currentSumireKeyboard.kind == .qwerty,
            currentSumireKeyboard.qwertyLanguage == .japanese,
            qwertyRawInput.isEmpty == false {
-            qwertyRawInput.removeLast()
-            setComposingText(romajiKanaText(from: qwertyRawInput))
+            deleteJapaneseQWERTYSegment()
             return
         }
 
@@ -2648,6 +2655,7 @@ final class KeyboardViewController: UIInputViewController {
             ensureJapanesePrecompositionStatus()
             qwertyRawInput.append(contentsOf: normalizedQWERTYRawInput(from: inputText))
             setComposingText(romajiKanaText(from: qwertyRawInput))
+            composingCursorPosition = composingText.count
         }
 
         if qwertyMode == .normal, qwertyShiftEnabled {
@@ -2747,50 +2755,53 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func romajiKanaText(from rawInput: String) -> String {
+        romajiKanaSegments(from: rawInput).map(\.output).joined()
+    }
+
+    private func romajiKanaSegments(from rawInput: String) -> [RomajiKanaSegment] {
         let input = normalizedQWERTYRawInput(from: rawInput)
         let originalCharacters = Array(input)
-        let lookupCharacters = Array(input.lowercased())
-        var output = ""
+        var segments: [RomajiKanaSegment] = []
         var index = 0
 
-        while index < lookupCharacters.count {
-            let character = lookupCharacters[index]
+        while index < originalCharacters.count {
+            let character = originalCharacters[index]
 
             if character == "n" {
                 let nextIndex = index + 1
-                if nextIndex < lookupCharacters.count {
-                    let nextCharacter = lookupCharacters[nextIndex]
+                if nextIndex < originalCharacters.count {
+                    let nextCharacter = originalCharacters[nextIndex]
                     if nextCharacter == "n" {
-                        output.append("ん")
+                        segments.append(RomajiKanaSegment(rawLength: 2, output: "ん"))
                         index = nextIndex + 1
                         continue
                     }
 
                     if isRomajiConsonant(nextCharacter), nextCharacter != "y" {
-                        output.append("ん")
+                        segments.append(RomajiKanaSegment(rawLength: 1, output: "ん"))
                         index = nextIndex
                         continue
                     }
                 }
             }
 
-            if shouldInsertSmallTsu(at: index, in: lookupCharacters) {
-                output.append("っ")
+            if shouldInsertSmallTsu(at: index, in: originalCharacters) {
+                segments.append(RomajiKanaSegment(rawLength: 1, output: "っ"))
                 index += 1
                 continue
             }
 
-            if let match = longestRomajiKanaMatch(in: lookupCharacters, from: index) {
-                output.append(match.kana)
+            if let match = longestRomajiKanaMatch(in: originalCharacters, from: index) {
+                segments.append(RomajiKanaSegment(rawLength: match.upperBound - index, output: match.kana))
                 index = match.upperBound
                 continue
             }
 
-            output.append(fallbackJapaneseQWERTYText(for: originalCharacters[index]))
+            segments.append(RomajiKanaSegment(rawLength: 1, output: fallbackJapaneseQWERTYText(for: originalCharacters[index])))
             index += 1
         }
 
-        return output
+        return segments
     }
 
     private func longestRomajiKanaMatch(
@@ -2804,7 +2815,12 @@ final class KeyboardViewController: UIInputViewController {
 
         for length in stride(from: maxLength, through: 1, by: -1) {
             let upperBound = index + length
-            let key = String(input[index..<upperBound])
+            let slice = Array(input[index..<upperBound])
+            guard slice.allSatisfy(isConvertibleRomajiCharacter) else {
+                continue
+            }
+
+            let key = String(slice).lowercased()
             if let kana = Self.romajiKanaMap[key] {
                 return (kana, upperBound)
             }
@@ -2824,6 +2840,45 @@ final class KeyboardViewController: UIInputViewController {
         return character == nextCharacter
             && character != "n"
             && isRomajiConsonant(character)
+    }
+
+    private func isConvertibleRomajiCharacter(_ character: Character) -> Bool {
+        if character.isASCII == false {
+            return false
+        }
+
+        if isASCIIUppercaseLetter(character) {
+            return false
+        }
+
+        return true
+    }
+
+    private func isASCIIUppercaseLetter(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first,
+              character.unicodeScalars.count == 1 else {
+            return false
+        }
+
+        return (65...90).contains(Int(scalar.value))
+    }
+
+    private func deleteJapaneseQWERTYSegment() {
+        let segments = romajiKanaSegments(from: qwertyRawInput)
+        guard segments.isEmpty == false else {
+            qwertyRawInput = ""
+            composingCursorPosition = 0
+            setComposingText("")
+            return
+        }
+
+        var nextRawInput = qwertyRawInput
+        nextRawInput.removeLast(segments.last?.rawLength ?? 0)
+        qwertyRawInput = nextRawInput
+
+        let nextText = segments.dropLast().map(\.output).joined()
+        composingCursorPosition = nextText.count
+        setComposingText(nextText)
     }
 
     private func isRomajiConsonant(_ character: Character) -> Bool {
