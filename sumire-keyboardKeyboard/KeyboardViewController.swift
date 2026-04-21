@@ -922,7 +922,14 @@ final class KeyboardViewController: UIInputViewController {
     private weak var keyboardSelectionOverlay: UIView?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
+    private var keyboardHeightConstraint: NSLayoutConstraint?
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
+
+    override func loadView() {
+        let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
+        inputView.allowsSelfSizing = true
+        view = inputView
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1000,8 +1007,12 @@ final class KeyboardViewController: UIInputViewController {
         view.addSubview(flickGuideView)
         flickGuideView.isHidden = true
 
+        let keyboardHeightConstraint = view.heightAnchor.constraint(equalToConstant: keyboardBaseHeight)
+        keyboardHeightConstraint.priority = UILayoutPriority(999)
+        self.keyboardHeightConstraint = keyboardHeightConstraint
+
         NSLayoutConstraint.activate([
-            view.heightAnchor.constraint(equalToConstant: keyboardBaseHeight),
+            keyboardHeightConstraint,
 
             contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
