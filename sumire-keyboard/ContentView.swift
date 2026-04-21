@@ -21,6 +21,12 @@ struct ContentView: View {
     private var liveConversionEnabled = true
 
     @AppStorage(
+        KeyboardSettings.Keys.preeditReadingPreviewEnabled,
+        store: KeyboardSettings.defaults
+    )
+    private var preeditReadingPreviewEnabled = false
+
+    @AppStorage(
         KeyboardSettings.Keys.usesHalfWidthSpace,
         store: KeyboardSettings.defaults
     )
@@ -130,6 +136,8 @@ struct ContentView: View {
     private var conversionSection: some View {
         Section("変換") {
             Toggle("Live Conversion", isOn: $liveConversionEnabled)
+
+            Toggle("PreEdit の読みを候補上部に表示", isOn: $preeditReadingPreviewEnabled)
 
             Toggle("Space キーで半角スペースを入力", isOn: $usesHalfWidthSpace)
 

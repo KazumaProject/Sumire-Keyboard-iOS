@@ -4,6 +4,7 @@ enum KeyboardSettings {
     enum Keys {
         static let japaneseFlickInputMode = "SumireKeyboardJapaneseFlickInputMode"
         static let liveConversionEnabled = "SumireKeyboardLiveConversionEnabled"
+        static let preeditReadingPreviewEnabled = "SumireKeyboardPreeditReadingPreviewEnabled"
         static let usesHalfWidthSpace = "SumireKeyboardUsesHalfWidthSpace"
         static let keyboards = "SumireKeyboardKeyboards"
         static let currentKeyboardID = "SumireKeyboardCurrentKeyboardID"
@@ -111,6 +112,18 @@ enum KeyboardSettings {
         }
         set {
             defaults.set(newValue, forKey: Keys.liveConversionEnabled)
+        }
+    }
+
+    static var preeditReadingPreviewEnabled: Bool {
+        get {
+            guard defaults.object(forKey: Keys.preeditReadingPreviewEnabled) != nil else {
+                return false
+            }
+            return defaults.bool(forKey: Keys.preeditReadingPreviewEnabled)
+        }
+        set {
+            defaults.set(newValue, forKey: Keys.preeditReadingPreviewEnabled)
         }
     }
 

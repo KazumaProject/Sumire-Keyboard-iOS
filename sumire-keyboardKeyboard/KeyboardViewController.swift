@@ -303,7 +303,7 @@ final class KeyboardViewController: UIInputViewController {
             configuration.baseForegroundColor = .label
             configuration.cornerStyle = .medium
             configuration.titleLineBreakMode = .byTruncatingTail
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8)
             self.configuration = configuration
             titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
             titleLabel?.adjustsFontSizeToFitWidth = true
@@ -353,6 +353,104 @@ final class KeyboardViewController: UIInputViewController {
             layer.borderColor = isSelected
                 ? UIColor.systemBlue.resolvedColor(with: traitCollection).cgColor
                 : UIColor.clear.cgColor
+        }
+    }
+
+    private final class PreeditReadingView: UIView {
+        private let scrollView = UIScrollView()
+        private let label = UILabel()
+
+        override var intrinsicContentSize: CGSize {
+            CGSize(width: UIView.noIntrinsicMetric, height: 16)
+        }
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            backgroundColor = .clear
+            clipsToBounds = true
+            translatesAutoresizingMaskIntoConstraints = false
+
+            scrollView.showsHorizontalScrollIndicator = false
+            scrollView.alwaysBounceHorizontal = true
+            scrollView.backgroundColor = .clear
+            scrollView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(scrollView)
+
+            label.numberOfLines = 1
+            label.lineBreakMode = .byClipping
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.setContentHuggingPriority(.required, for: .horizontal)
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            scrollView.addSubview(label)
+
+            NSLayoutConstraint.activate([
+                scrollView.topAnchor.constraint(equalTo: topAnchor),
+                scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+                label.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 8),
+                label.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -8),
+                label.centerYAnchor.constraint(equalTo: scrollView.frameLayoutGuide.centerYAnchor),
+                label.heightAnchor.constraint(lessThanOrEqualTo: scrollView.frameLayoutGuide.heightAnchor),
+                label.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.frameLayoutGuide.widthAnchor, constant: -16)
+            ])
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        func configure(
+            text: String,
+            conversionRange: Range<Int>,
+            nonTargetRanges: [Range<Int>]
+        ) {
+            let attributedText = NSMutableAttributedString(string: text)
+            let fullRange = NSRange(location: 0, length: attributedText.length)
+            attributedText.addAttributes([
+                .font: UIFont.systemFont(ofSize: 12, weight: .medium),
+                .foregroundColor: UIColor.label
+            ], range: fullRange)
+
+            if let targetRange = nsRange(for: conversionRange, in: text) {
+                attributedText.addAttributes([
+                    .backgroundColor: UIColor.systemBlue.withAlphaComponent(0.18),
+                    .font: UIFont.systemFont(ofSize: 12, weight: .semibold)
+                ], range: targetRange)
+            }
+
+            for range in nonTargetRanges {
+                guard let underlineRange = nsRange(for: range, in: text) else {
+                    continue
+                }
+                attributedText.addAttributes([
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                    .underlineColor: UIColor.secondaryLabel
+                ], range: underlineRange)
+            }
+
+            label.attributedText = attributedText
+            isHidden = false
+        }
+
+        func clear() {
+            label.attributedText = nil
+            isHidden = true
+            scrollView.setContentOffset(.zero, animated: false)
+        }
+
+        private func nsRange(for range: Range<Int>, in text: String) -> NSRange? {
+            let lowerBound = min(max(range.lowerBound, 0), text.count)
+            let upperBound = min(max(range.upperBound, lowerBound), text.count)
+            guard lowerBound < upperBound else {
+                return nil
+            }
+
+            let lowerIndex = text.index(text.startIndex, offsetBy: lowerBound)
+            let upperIndex = text.index(text.startIndex, offsetBy: upperBound)
+            return NSRange(lowerIndex..<upperIndex, in: text)
         }
     }
 
@@ -773,6 +871,7 @@ final class KeyboardViewController: UIInputViewController {
     private var qwertyCapsLockEnabled = false
     private var lastQWERTYShiftTapDate: Date?
     private var qwertyRawInput = ""
+    private var preeditReadingPreviewEnabled = KeyboardSettings.preeditReadingPreviewEnabled
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
@@ -789,6 +888,7 @@ final class KeyboardViewController: UIInputViewController {
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
     private var candidateButtons: [CandidateButton] = []
+    private let preeditReadingView = PreeditReadingView()
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
     private let keyboardStack = UIStackView()
@@ -797,6 +897,7 @@ final class KeyboardViewController: UIInputViewController {
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
+    private let keyboardBaseHeight: CGFloat = 292
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
@@ -834,6 +935,7 @@ final class KeyboardViewController: UIInputViewController {
         super.traitCollectionDidChange(previousTraitCollection)
         view.backgroundColor = KeyboardTheme.keyboardBackground
         flickGuideView.setNeedsLayout()
+        updatePreeditReadingPreview()
         candidateButtons.forEach { $0.setNeedsLayout() }
     }
 
@@ -887,6 +989,7 @@ final class KeyboardViewController: UIInputViewController {
         keyboardStack.spacing = 6
 
         mainKeyboardContainer.translatesAutoresizingMaskIntoConstraints = false
+        preeditReadingView.isHidden = true
         contentStack.addArrangedSubview(candidateBar)
         contentStack.addArrangedSubview(keyboardStack)
         view.addSubview(contentStack)
@@ -894,7 +997,7 @@ final class KeyboardViewController: UIInputViewController {
         flickGuideView.isHidden = true
 
         NSLayoutConstraint.activate([
-            view.heightAnchor.constraint(greaterThanOrEqualToConstant: 292),
+            view.heightAnchor.constraint(equalToConstant: keyboardBaseHeight),
 
             contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
@@ -910,6 +1013,13 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func makeCandidateBar() -> UIView {
+        let candidateBar = UIStackView()
+        candidateBar.axis = .vertical
+        candidateBar.alignment = .fill
+        candidateBar.distribution = .fill
+        candidateBar.spacing = 0
+        candidateBar.translatesAutoresizingMaskIntoConstraints = false
+
         candidateScrollView.showsHorizontalScrollIndicator = true
         candidateScrollView.alwaysBounceHorizontal = true
         candidateScrollView.backgroundColor = .clear
@@ -930,7 +1040,9 @@ final class KeyboardViewController: UIInputViewController {
             candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor)
         ])
 
-        return candidateScrollView
+        candidateBar.addArrangedSubview(preeditReadingView)
+        candidateBar.addArrangedSubview(candidateScrollView)
+        return candidateBar
     }
 
     private func rebuildKeyboardLayout() {
@@ -1620,7 +1732,7 @@ final class KeyboardViewController: UIInputViewController {
             stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12)
+//            stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12)
         ])
 
         return container
@@ -2465,6 +2577,7 @@ final class KeyboardViewController: UIInputViewController {
     private func updatePreedit() {
         normalizeCompositionRanges()
         updateSpaceButtonTitle()
+        updatePreeditReadingPreview()
 
         let candidates = currentCandidateTexts()
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
@@ -2503,6 +2616,47 @@ final class KeyboardViewController: UIInputViewController {
         } else {
             candidateScrollView.setContentOffset(.zero, animated: false)
         }
+    }
+
+    private func updatePreeditReadingPreview() {
+        guard preeditReadingPreviewEnabled,
+              mainKeyboardPanel != .emoji,
+              isDirectMode == false,
+              composingText.isEmpty == false else {
+            preeditReadingView.clear()
+            return
+        }
+
+        let activeRange = normalizedConversionRange()
+        preeditReadingView.configure(
+            text: composingText,
+            conversionRange: activeRange,
+            nonTargetRanges: nonConversionPreeditRanges(textCount: composingText.count, conversionRange: activeRange)
+        )
+    }
+
+    private func nonConversionPreeditRanges(
+        textCount: Int,
+        conversionRange: Range<Int>
+    ) -> [Range<Int>] {
+        guard textCount > 0 else {
+            return []
+        }
+
+        let lowerBound = min(max(conversionRange.lowerBound, 0), textCount)
+        let upperBound = min(max(conversionRange.upperBound, lowerBound), textCount)
+        guard lowerBound < upperBound else {
+            return [0..<textCount]
+        }
+
+        var ranges: [Range<Int>] = []
+        if lowerBound > 0 {
+            ranges.append(0..<lowerBound)
+        }
+        if upperBound < textCount {
+            ranges.append(upperBound..<textCount)
+        }
+        return ranges
     }
 
     private func updateSpaceButtonTitle() {
@@ -3176,12 +3330,19 @@ final class KeyboardViewController: UIInputViewController {
 
         let nextLiveConversionEnabled = KeyboardSettings.liveConversionEnabled
         var shouldRenderComposition = false
+        var shouldUpdatePreedit = false
         if case .precomposition(var status) = inputStatus,
            status.liveConversionEnabled != nextLiveConversionEnabled {
             status.liveConversionEnabled = nextLiveConversionEnabled
             status.displayMode = nextLiveConversionEnabled ? .liveCandidate : .reading
             inputStatus = .precomposition(status)
             shouldRenderComposition = true
+        }
+
+        let nextPreeditReadingPreviewEnabled = KeyboardSettings.preeditReadingPreviewEnabled
+        if preeditReadingPreviewEnabled != nextPreeditReadingPreviewEnabled {
+            preeditReadingPreviewEnabled = nextPreeditReadingPreviewEnabled
+            shouldUpdatePreedit = true
         }
 
         if shouldApplyKeyboard {
@@ -3191,6 +3352,8 @@ final class KeyboardViewController: UIInputViewController {
 
         if shouldRenderComposition {
             renderCurrentComposingText()
+        }
+        if shouldRenderComposition || shouldUpdatePreedit {
             updatePreedit()
         }
     }
