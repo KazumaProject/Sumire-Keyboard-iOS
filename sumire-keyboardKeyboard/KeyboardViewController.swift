@@ -303,9 +303,9 @@ final class KeyboardViewController: UIInputViewController {
             configuration.baseForegroundColor = .label
             configuration.cornerStyle = .medium
             configuration.titleLineBreakMode = .byTruncatingTail
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8)
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
             self.configuration = configuration
-            titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+            titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
             titleLabel?.adjustsFontSizeToFitWidth = true
             titleLabel?.minimumScaleFactor = 0.72
             titleLabel?.numberOfLines = 1
@@ -357,23 +357,28 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private final class PreeditReadingView: UIView {
+        private static let rowHeight: CGFloat = 18
+        private static let font = UIFont.systemFont(ofSize: 11, weight: .medium)
+        private static let emphasizedFont = UIFont.systemFont(ofSize: 11, weight: .semibold)
+
         private let scrollView = UIScrollView()
         private let label = UILabel()
 
         override var intrinsicContentSize: CGSize {
-            CGSize(width: UIView.noIntrinsicMetric, height: 16)
+            CGSize(width: UIView.noIntrinsicMetric, height: Self.rowHeight)
         }
 
         override init(frame: CGRect) {
             super.init(frame: frame)
 
             backgroundColor = .clear
-            clipsToBounds = true
+            clipsToBounds = false
             translatesAutoresizingMaskIntoConstraints = false
 
             scrollView.showsHorizontalScrollIndicator = false
             scrollView.alwaysBounceHorizontal = true
             scrollView.backgroundColor = .clear
+            scrollView.clipsToBounds = false
             scrollView.translatesAutoresizingMaskIntoConstraints = false
             addSubview(scrollView)
 
@@ -393,7 +398,6 @@ final class KeyboardViewController: UIInputViewController {
                 label.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 8),
                 label.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -8),
                 label.centerYAnchor.constraint(equalTo: scrollView.frameLayoutGuide.centerYAnchor),
-                label.heightAnchor.constraint(lessThanOrEqualTo: scrollView.frameLayoutGuide.heightAnchor),
                 label.widthAnchor.constraint(greaterThanOrEqualTo: scrollView.frameLayoutGuide.widthAnchor, constant: -16)
             ])
         }
@@ -410,14 +414,14 @@ final class KeyboardViewController: UIInputViewController {
             let attributedText = NSMutableAttributedString(string: text)
             let fullRange = NSRange(location: 0, length: attributedText.length)
             attributedText.addAttributes([
-                .font: UIFont.systemFont(ofSize: 12, weight: .medium),
+                .font: Self.font,
                 .foregroundColor: UIColor.label
             ], range: fullRange)
 
             if let targetRange = nsRange(for: conversionRange, in: text) {
                 attributedText.addAttributes([
                     .backgroundColor: UIColor.systemBlue.withAlphaComponent(0.18),
-                    .font: UIFont.systemFont(ofSize: 12, weight: .semibold)
+                    .font: Self.emphasizedFont
                 ], range: targetRange)
             }
 
