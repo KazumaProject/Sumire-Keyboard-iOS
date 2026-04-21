@@ -9,9 +9,11 @@ enum KeyboardSettings {
         static let keyboards = "SumireKeyboardKeyboards"
         static let currentKeyboardID = "SumireKeyboardCurrentKeyboardID"
         static let keyboardWidthPortrait = "SumireKeyboardWidthPortrait"
+        static let keyboardLeadingOffsetPortrait = "SumireKeyboardLeadingOffsetPortrait"
         static let keyboardHeightPortrait = "SumireKeyboardHeightPortrait"
         static let keyboardBottomMarginPortrait = "SumireKeyboardBottomMarginPortrait"
         static let keyboardWidthLandscape = "SumireKeyboardWidthLandscape"
+        static let keyboardLeadingOffsetLandscape = "SumireKeyboardLeadingOffsetLandscape"
         static let keyboardHeightLandscape = "SumireKeyboardHeightLandscape"
         static let keyboardBottomMarginLandscape = "SumireKeyboardBottomMarginLandscape"
     }
@@ -106,6 +108,15 @@ enum KeyboardSettings {
             }
         }
 
+        var leadingOffsetKey: String {
+            switch self {
+            case .portrait:
+                return Keys.keyboardLeadingOffsetPortrait
+            case .landscape:
+                return Keys.keyboardLeadingOffsetLandscape
+            }
+        }
+
         var heightKey: String {
             switch self {
             case .portrait:
@@ -127,12 +138,14 @@ enum KeyboardSettings {
 
     struct KeyboardLayoutMetrics: Equatable {
         var width: Double?
+        var leadingOffset: Double
         var height: Double
         var bottomMargin: Double
     }
 
     static let appGroupIdentifier = "group.com.kazumaproject.sumire-keyboard"
     static let settingsURL = URL(string: "sumirekeyboard://settings")
+    static let defaultKeyboardLeadingOffset: Double = 6
     static let defaultKeyboardHeight: Double = 292
     static let defaultKeyboardBottomMargin: Double = 8
 
@@ -198,6 +211,13 @@ enum KeyboardSettings {
             width = defaults.double(forKey: orientation.widthKey)
         }
 
+        let leadingOffset: Double
+        if defaults.object(forKey: orientation.leadingOffsetKey) == nil {
+            leadingOffset = defaultKeyboardLeadingOffset
+        } else {
+            leadingOffset = defaults.double(forKey: orientation.leadingOffsetKey)
+        }
+
         let height: Double
         if defaults.object(forKey: orientation.heightKey) == nil {
             height = defaultKeyboardHeight
@@ -214,6 +234,7 @@ enum KeyboardSettings {
 
         return KeyboardLayoutMetrics(
             width: width,
+            leadingOffset: leadingOffset,
             height: height,
             bottomMargin: bottomMargin
         )
@@ -228,12 +249,14 @@ enum KeyboardSettings {
         } else {
             defaults.removeObject(forKey: orientation.widthKey)
         }
+        defaults.set(metrics.leadingOffset, forKey: orientation.leadingOffsetKey)
         defaults.set(metrics.height, forKey: orientation.heightKey)
         defaults.set(metrics.bottomMargin, forKey: orientation.bottomMarginKey)
     }
 
     static func resetKeyboardLayoutMetrics(for orientation: KeyboardOrientation) {
         defaults.removeObject(forKey: orientation.widthKey)
+        defaults.removeObject(forKey: orientation.leadingOffsetKey)
         defaults.removeObject(forKey: orientation.heightKey)
         defaults.removeObject(forKey: orientation.bottomMarginKey)
     }

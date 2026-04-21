@@ -128,14 +128,19 @@ final class KeyboardViewController: UIInputViewController {
         case bottomLeft
         case left
 
-        var horizontalSign: CGFloat {
+        enum HorizontalEdge {
+            case left
+            case right
+        }
+
+        var horizontalEdge: HorizontalEdge? {
             switch self {
             case .topLeft, .left, .bottomLeft:
-                return -1
+                return .left
             case .topRight, .right, .bottomRight:
-                return 1
+                return .right
             case .top, .bottom:
-                return 0
+                return nil
             }
         }
 
@@ -163,6 +168,14 @@ final class KeyboardViewController: UIInputViewController {
             }
             return false
         }
+    }
+
+    private struct ResizePanStartState {
+        var metrics: KeyboardSettings.KeyboardLayoutMetrics
+        var leadingOffset: CGFloat
+        var width: CGFloat
+        var height: CGFloat
+        var containerWidth: CGFloat
     }
 
     private final class KeyboardButton: UIButton {
@@ -521,6 +534,37 @@ final class KeyboardViewController: UIInputViewController {
             layer.borderWidth = 2
             layer.borderColor = UIColor.white.withAlphaComponent(0.92).cgColor
             translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+    }
+
+    private final class KeyboardMoveHandleView: UIView {
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            backgroundColor = .systemBlue
+            layer.cornerRadius = 18
+            layer.borderWidth = 2
+            layer.borderColor = UIColor.white.withAlphaComponent(0.92).cgColor
+            translatesAutoresizingMaskIntoConstraints = false
+            isAccessibilityElement = true
+            accessibilityLabel = "キーボードの移動"
+
+            let imageView = UIImageView(image: UIImage(systemName: "arrow.up.and.down.and.arrow.left.and.right"))
+            imageView.tintColor = .white
+            imageView.contentMode = .scaleAspectFit
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(imageView)
+
+            NSLayoutConstraint.activate([
+                imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+                imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+                imageView.widthAnchor.constraint(equalToConstant: 19),
+                imageView.heightAnchor.constraint(equalToConstant: 19)
+            ])
         }
 
         required init?(coder: NSCoder) {
@@ -966,12 +1010,14 @@ final class KeyboardViewController: UIInputViewController {
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
     private let emptyPreeditToolbar = UIStackView()
+    private let contentStack = UIStackView()
     private let keyboardStack = UIStackView()
     private let mainKeyboardContainer = UIView()
     private let flickGuideView = FlickGuideView()
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
+    private let keyboardHorizontalInset = CGFloat(KeyboardSettings.defaultKeyboardLeadingOffset)
     private let keyboardBaseHeight = CGFloat(KeyboardSettings.defaultKeyboardHeight)
     private let keyboardDefaultBottomMargin = CGFloat(KeyboardSettings.defaultKeyboardBottomMargin)
     private let keyboardMinimumWidth: CGFloat = 260
@@ -1004,14 +1050,17 @@ final class KeyboardViewController: UIInputViewController {
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private var keyboardHeightConstraint: NSLayoutConstraint?
-    private var keyboardWidthConstraint: NSLayoutConstraint?
+    private var contentLeadingConstraint: NSLayoutConstraint?
+    private var contentTrailingConstraint: NSLayoutConstraint?
     private var contentBottomConstraint: NSLayoutConstraint?
     private var appliedKeyboardOrientation: KeyboardSettings.KeyboardOrientation?
     private var currentLayoutMetrics = KeyboardSettings.KeyboardLayoutMetrics(
         width: nil,
+        leadingOffset: KeyboardSettings.defaultKeyboardLeadingOffset,
         height: KeyboardSettings.defaultKeyboardHeight,
         bottomMargin: KeyboardSettings.defaultKeyboardBottomMargin
     )
+    private var resizePanStartState: ResizePanStartState?
     private weak var resizeOverlayView: UIView?
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
 
@@ -1084,7 +1133,6 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func setupKeyboardLayout() {
-        let contentStack = UIStackView()
         contentStack.axis = .vertical
         contentStack.alignment = .fill
         contentStack.distribution = .fill
@@ -1113,13 +1161,23 @@ final class KeyboardViewController: UIInputViewController {
             constant: -keyboardDefaultBottomMargin
         )
         self.contentBottomConstraint = contentBottomConstraint
+        let contentLeadingConstraint = contentStack.leadingAnchor.constraint(
+            equalTo: view.leadingAnchor,
+            constant: keyboardHorizontalInset
+        )
+        let contentTrailingConstraint = contentStack.trailingAnchor.constraint(
+            equalTo: view.trailingAnchor,
+            constant: -keyboardHorizontalInset
+        )
+        self.contentLeadingConstraint = contentLeadingConstraint
+        self.contentTrailingConstraint = contentTrailingConstraint
 
         NSLayoutConstraint.activate([
             keyboardHeightConstraint,
 
             contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
-            contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
-            contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+            contentLeadingConstraint,
+            contentTrailingConstraint,
             contentBottomConstraint,
 
             candidateBar.heightAnchor.constraint(equalToConstant: 38)
@@ -1247,12 +1305,6 @@ final class KeyboardViewController: UIInputViewController {
         clearActiveQWERTYButton()
         applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
 
-        var editableMetrics = currentLayoutMetrics
-        if editableMetrics.width == nil {
-            editableMetrics.width = Double(currentResizableKeyboardWidth())
-            applyKeyboardLayoutMetrics(editableMetrics, persists: false)
-        }
-
         let overlay = UIView()
         overlay.backgroundColor = .clear
         overlay.isUserInteractionEnabled = true
@@ -1262,11 +1314,12 @@ final class KeyboardViewController: UIInputViewController {
 
         addResizeOverlayControls(to: overlay)
         addResizeHandles(to: overlay)
+        addKeyboardMoveHandle(to: overlay)
 
         NSLayoutConstraint.activate([
             overlay.topAnchor.constraint(equalTo: view.topAnchor),
-            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.leadingAnchor.constraint(equalTo: contentStack.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor),
             overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         view.bringSubviewToFront(overlay)
@@ -1415,29 +1468,100 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func addKeyboardMoveHandle(to overlay: UIView) {
+        let handle = KeyboardMoveHandleView()
+        let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handleKeyboardMovePan(_:)))
+        handle.addGestureRecognizer(panGesture)
+        overlay.addSubview(handle)
+
+        NSLayoutConstraint.activate([
+            handle.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            handle.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+            handle.widthAnchor.constraint(equalToConstant: 36),
+            handle.heightAnchor.constraint(equalToConstant: 36)
+        ])
+    }
+
     @objc private func handleResizePan(_ gesture: UIPanGestureRecognizer) {
         guard let handle = gesture.view as? ResizeHandleView else {
             return
         }
 
+        if gesture.state == .began || resizePanStartState == nil {
+            resizePanStartState = ResizePanStartState(
+                metrics: currentLayoutMetrics,
+                leadingOffset: currentResizableKeyboardLeadingOffset(),
+                width: currentResizableKeyboardWidth(),
+                height: CGFloat(currentLayoutMetrics.height),
+                containerWidth: currentResizableKeyboardContainerWidth()
+            )
+        }
+
         let translation = gesture.translation(in: view)
-        guard translation != .zero else {
+        guard translation != .zero, let startState = resizePanStartState else {
+            if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+                resizePanStartState = nil
+            }
+            return
+        }
+
+        var metrics = startState.metrics
+        var leadingOffset = startState.leadingOffset
+        var width = startState.width
+        var height = startState.height
+
+        if let horizontalEdge = handle.position.horizontalEdge {
+            switch horizontalEdge {
+            case .left:
+                let rightEdge = startState.leadingOffset + startState.width
+                let minimumLeadingOffset = keyboardHorizontalInset
+                let maximumLeadingOffset = max(
+                    minimumLeadingOffset,
+                    rightEdge - keyboardMinimumWidth
+                )
+                leadingOffset = min(
+                    max(startState.leadingOffset + translation.x, minimumLeadingOffset),
+                    maximumLeadingOffset
+                )
+                width = rightEdge - leadingOffset
+            case .right:
+                let maximumWidth = max(
+                    keyboardMinimumWidth,
+                    startState.containerWidth - startState.leadingOffset - keyboardHorizontalInset
+                )
+                leadingOffset = startState.leadingOffset
+                width = min(
+                    max(startState.width + translation.x, keyboardMinimumWidth),
+                    maximumWidth
+                )
+            }
+            metrics.leadingOffset = Double(leadingOffset)
+            metrics.width = Double(width)
+        }
+        if handle.position.verticalSign != 0 {
+            height = startState.height + translation.y * handle.position.verticalSign
+        }
+
+        metrics.height = Double(height)
+        applyKeyboardLayoutMetrics(metrics, persists: true)
+
+        if gesture.state == .ended || gesture.state == .cancelled || gesture.state == .failed {
+            resizePanStartState = nil
+        }
+    }
+
+    @objc private func handleKeyboardMovePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: view)
+        guard translation.x != 0 else {
             return
         }
 
         var metrics = currentLayoutMetrics
-        var width = CGFloat(metrics.width ?? Double(currentResizableKeyboardWidth()))
-        var height = CGFloat(metrics.height)
-
-        if handle.position.horizontalSign != 0 {
-            width += translation.x * handle.position.horizontalSign
+        if metrics.width == nil {
+            metrics.width = Double(currentResizableKeyboardWidth())
+            metrics.leadingOffset = Double(currentResizableKeyboardLeadingOffset())
         }
-        if handle.position.verticalSign != 0 {
-            height += translation.y * handle.position.verticalSign
-        }
-
-        metrics.width = Double(width)
-        metrics.height = Double(height)
+        metrics.leadingOffset += Double(translation.x)
         applyKeyboardLayoutMetrics(metrics, persists: true)
         gesture.setTranslation(.zero, in: view)
     }
@@ -1447,6 +1571,7 @@ final class KeyboardViewController: UIInputViewController {
         KeyboardSettings.resetKeyboardLayoutMetrics(for: orientation)
         let metrics = KeyboardSettings.KeyboardLayoutMetrics(
             width: nil,
+            leadingOffset: KeyboardSettings.defaultKeyboardLeadingOffset,
             height: KeyboardSettings.defaultKeyboardHeight,
             bottomMargin: KeyboardSettings.defaultKeyboardBottomMargin
         )
@@ -1470,6 +1595,7 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func exitKeyboardResizeMode() {
+        resizePanStartState = nil
         resizeOverlayView?.removeFromSuperview()
         resizeOverlayView = nil
     }
@@ -1490,20 +1616,19 @@ final class KeyboardViewController: UIInputViewController {
         persists: Bool
     ) {
         let orientation = currentKeyboardOrientation()
-        let sanitizedMetrics = sanitizedKeyboardLayoutMetrics(metrics, orientation: orientation)
+        let sanitizedMetrics = sanitizedKeyboardLayoutMetrics(metrics)
         currentLayoutMetrics = sanitizedMetrics
 
+        let leadingOffset = CGFloat(sanitizedMetrics.leadingOffset)
+        contentLeadingConstraint?.constant = leadingOffset
         if let width = sanitizedMetrics.width {
-            if keyboardWidthConstraint == nil {
-                let widthConstraint = view.widthAnchor.constraint(equalToConstant: CGFloat(width))
-                widthConstraint.priority = UILayoutPriority(999)
-                keyboardWidthConstraint = widthConstraint
-                widthConstraint.isActive = true
-            }
-            keyboardWidthConstraint?.constant = CGFloat(width)
+            let trailingInset = max(
+                keyboardHorizontalInset,
+                currentResizableKeyboardContainerWidth() - leadingOffset - CGFloat(width)
+            )
+            contentTrailingConstraint?.constant = -trailingInset
         } else {
-            keyboardWidthConstraint?.isActive = false
-            keyboardWidthConstraint = nil
+            contentTrailingConstraint?.constant = -keyboardHorizontalInset
         }
 
         keyboardHeightConstraint?.constant = CGFloat(sanitizedMetrics.height)
@@ -1514,15 +1639,30 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     private func sanitizedKeyboardLayoutMetrics(
-        _ metrics: KeyboardSettings.KeyboardLayoutMetrics,
-        orientation: KeyboardSettings.KeyboardOrientation
+        _ metrics: KeyboardSettings.KeyboardLayoutMetrics
     ) -> KeyboardSettings.KeyboardLayoutMetrics {
-        let maximumWidth = keyboardMaximumWidth(for: orientation)
+        let maximumWidth = keyboardMaximumWidth()
         let width = metrics.width.map {
             min(max($0, Double(keyboardMinimumWidth)), Double(maximumWidth))
+        }
+        let leadingOffset: Double
+        if let width {
+            let maximumLeadingOffset = max(
+                keyboardHorizontalInset,
+                currentResizableKeyboardContainerWidth() - CGFloat(width) - keyboardHorizontalInset
+            )
+            leadingOffset = Double(
+                min(
+                    max(CGFloat(metrics.leadingOffset), keyboardHorizontalInset),
+                    maximumLeadingOffset
+                )
+            )
+        } else {
+            leadingOffset = Double(keyboardHorizontalInset)
         }
         let height = min(max(metrics.height, Double(keyboardMinimumHeight)), Double(keyboardMaximumHeight))
         let bottomMargin = min(
@@ -1532,6 +1672,7 @@ final class KeyboardViewController: UIInputViewController {
 
         return KeyboardSettings.KeyboardLayoutMetrics(
             width: width,
+            leadingOffset: leadingOffset,
             height: height,
             bottomMargin: bottomMargin
         )
@@ -1541,8 +1682,29 @@ final class KeyboardViewController: UIInputViewController {
         if let width = currentLayoutMetrics.width {
             return CGFloat(width)
         }
+        if contentStack.bounds.width > 0 {
+            return contentStack.bounds.width
+        }
         if view.bounds.width > 0 {
             return view.bounds.width
+        }
+        return defaultKeyboardWidth(for: currentKeyboardOrientation())
+    }
+
+    private func currentResizableKeyboardLeadingOffset() -> CGFloat {
+        let leadingOffset = contentStack.frame.minX
+        if leadingOffset > 0 {
+            return leadingOffset
+        }
+        return keyboardHorizontalInset
+    }
+
+    private func currentResizableKeyboardContainerWidth() -> CGFloat {
+        if view.bounds.width > 0 {
+            return view.bounds.width
+        }
+        if let superviewWidth = view.superview?.bounds.width, superviewWidth > 0 {
+            return superviewWidth
         }
         return defaultKeyboardWidth(for: currentKeyboardOrientation())
     }
@@ -1566,11 +1728,10 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func keyboardMaximumWidth(for orientation: KeyboardSettings.KeyboardOrientation) -> CGFloat {
+    private func keyboardMaximumWidth() -> CGFloat {
         max(
-            defaultKeyboardWidth(for: orientation),
-            view.superview?.bounds.width ?? 0,
-            view.bounds.width
+            keyboardMinimumWidth,
+            currentResizableKeyboardContainerWidth() - keyboardHorizontalInset * 2
         )
     }
 
