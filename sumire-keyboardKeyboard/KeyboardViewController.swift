@@ -118,6 +118,39 @@ final class KeyboardViewController: UIInputViewController {
         case reading
     }
 
+    private enum ResizeHandlePosition: CaseIterable {
+        case topLeft
+        case top
+        case topRight
+        case right
+        case bottomRight
+        case bottom
+        case bottomLeft
+        case left
+
+        var horizontalSign: CGFloat {
+            switch self {
+            case .topLeft, .left, .bottomLeft:
+                return -1
+            case .topRight, .right, .bottomRight:
+                return 1
+            case .top, .bottom:
+                return 0
+            }
+        }
+
+        var verticalSign: CGFloat {
+            switch self {
+            case .topLeft, .top, .topRight:
+                return -1
+            case .bottomLeft, .bottom, .bottomRight:
+                return 1
+            case .left, .right:
+                return 0
+            }
+        }
+    }
+
     private struct PrecompositionStatus: Equatable {
         var language: PrecompositionLanguage
         var phase: PrecompositionPhase
@@ -138,6 +171,12 @@ final class KeyboardViewController: UIInputViewController {
         private let highlightedBackgroundColor: UIColor
         private let normalForegroundColor: UIColor
         private var stackedTitleStack: UIStackView?
+        var usesTapOnlyHighlight = false {
+            didSet {
+                updateBackgroundForCurrentState()
+            }
+        }
+        private var tapHighlightIsVisible = false
 
         init(
             title: String? = nil,
@@ -205,10 +244,21 @@ final class KeyboardViewController: UIInputViewController {
 
         private func updateBackgroundForCurrentState() {
             var updatedConfiguration = configuration
-            updatedConfiguration?.baseBackgroundColor = (isHighlighted || isSelected)
+            let showsHighlight = isSelected
+                || (usesTapOnlyHighlight ? tapHighlightIsVisible : isHighlighted)
+            updatedConfiguration?.baseBackgroundColor = showsHighlight
                 ? highlightedBackgroundColor
                 : normalBackgroundColor
             configuration = updatedConfiguration
+        }
+
+        func flashTapHighlight() {
+            tapHighlightIsVisible = true
+            updateBackgroundForCurrentState()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.tapHighlightIsVisible = false
+                self?.updateBackgroundForCurrentState()
+            }
         }
 
         func updateTitle(_ title: String) {
@@ -456,6 +506,25 @@ final class KeyboardViewController: UIInputViewController {
             let lowerIndex = text.index(text.startIndex, offsetBy: lowerBound)
             let upperIndex = text.index(text.startIndex, offsetBy: upperBound)
             return NSRange(lowerIndex..<upperIndex, in: text)
+        }
+    }
+
+    private final class ResizeHandleView: UIView {
+        let position: ResizeHandlePosition
+
+        init(position: ResizeHandlePosition) {
+            self.position = position
+            super.init(frame: .zero)
+
+            backgroundColor = .systemBlue
+            layer.cornerRadius = 8
+            layer.borderWidth = 2
+            layer.borderColor = UIColor.white.withAlphaComponent(0.92).cgColor
+            translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
         }
     }
 
@@ -896,13 +965,20 @@ final class KeyboardViewController: UIInputViewController {
     private let preeditReadingView = PreeditReadingView()
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
+    private let emptyPreeditToolbar = UIStackView()
     private let keyboardStack = UIStackView()
     private let mainKeyboardContainer = UIView()
     private let flickGuideView = FlickGuideView()
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
-    private let keyboardBaseHeight: CGFloat = 292
+    private let keyboardBaseHeight = CGFloat(KeyboardSettings.defaultKeyboardHeight)
+    private let keyboardDefaultBottomMargin = CGFloat(KeyboardSettings.defaultKeyboardBottomMargin)
+    private let keyboardMinimumWidth: CGFloat = 260
+    private let keyboardMinimumHeight: CGFloat = 190
+    private let keyboardMaximumHeight: CGFloat = 520
+    private let keyboardBottomMarginStep: CGFloat = 4
+    private let keyboardMaximumBottomMargin: CGFloat = 80
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
@@ -928,6 +1004,15 @@ final class KeyboardViewController: UIInputViewController {
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private var keyboardHeightConstraint: NSLayoutConstraint?
+    private var keyboardWidthConstraint: NSLayoutConstraint?
+    private var contentBottomConstraint: NSLayoutConstraint?
+    private var appliedKeyboardOrientation: KeyboardSettings.KeyboardOrientation?
+    private var currentLayoutMetrics = KeyboardSettings.KeyboardLayoutMetrics(
+        width: nil,
+        height: KeyboardSettings.defaultKeyboardHeight,
+        bottomMargin: KeyboardSettings.defaultKeyboardBottomMargin
+    )
+    private weak var resizeOverlayView: UIView?
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
 
     override func loadView() {
@@ -958,7 +1043,13 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
         scheduleKanaKanjiConverterLoad(delay: 0.25)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyStoredKeyboardLayoutMetricsIfNeeded()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -975,6 +1066,7 @@ final class KeyboardViewController: UIInputViewController {
         stopReverseCycleStateTimer()
         stopKeyboardSwitchLongPressTimer()
         hideKeyboardSelectionOverlay()
+        exitKeyboardResizeMode()
         commitRenderedComposingTextAsTyped()
     }
 
@@ -1016,6 +1108,11 @@ final class KeyboardViewController: UIInputViewController {
         let keyboardHeightConstraint = view.heightAnchor.constraint(equalToConstant: keyboardBaseHeight)
         keyboardHeightConstraint.priority = UILayoutPriority(999)
         self.keyboardHeightConstraint = keyboardHeightConstraint
+        let contentBottomConstraint = contentStack.bottomAnchor.constraint(
+            equalTo: view.bottomAnchor,
+            constant: -keyboardDefaultBottomMargin
+        )
+        self.contentBottomConstraint = contentBottomConstraint
 
         NSLayoutConstraint.activate([
             keyboardHeightConstraint,
@@ -1023,10 +1120,12 @@ final class KeyboardViewController: UIInputViewController {
             contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
             contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
             contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
-            contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
+            contentBottomConstraint,
 
             candidateBar.heightAnchor.constraint(equalToConstant: 38)
         ])
+
+        applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
 
         rebuildKeyboardLayout()
         updateModeSwitchButtonTitle()
@@ -1052,6 +1151,7 @@ final class KeyboardViewController: UIInputViewController {
         candidateStack.spacing = 6
         candidateStack.translatesAutoresizingMaskIntoConstraints = false
         candidateScrollView.addSubview(candidateStack)
+        configureEmptyPreeditToolbar()
 
         NSLayoutConstraint.activate([
             candidateStack.topAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.topAnchor),
@@ -1063,7 +1163,415 @@ final class KeyboardViewController: UIInputViewController {
 
         candidateBar.addArrangedSubview(preeditReadingView)
         candidateBar.addArrangedSubview(candidateScrollView)
+        candidateBar.addArrangedSubview(emptyPreeditToolbar)
+        emptyPreeditToolbar.isHidden = true
         return candidateBar
+    }
+
+    private func configureEmptyPreeditToolbar() {
+        guard emptyPreeditToolbar.arrangedSubviews.isEmpty else {
+            return
+        }
+
+        emptyPreeditToolbar.axis = .horizontal
+        emptyPreeditToolbar.alignment = .center
+        emptyPreeditToolbar.distribution = .fill
+        emptyPreeditToolbar.spacing = 6
+        emptyPreeditToolbar.translatesAutoresizingMaskIntoConstraints = false
+
+        let settingsButton = makeCandidateToolbarButton(
+            systemImageName: "gearshape",
+            accessibilityLabel: "設定",
+            action: #selector(openKeyboardSettingsApp)
+        )
+        let resizeButton = makeCandidateToolbarButton(
+            systemImageName: "arrow.up.left.and.arrow.down.right",
+            accessibilityLabel: "キーボードのResize",
+            action: #selector(enterKeyboardResizeMode)
+        )
+        let spacer = UIView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyPreeditToolbar.addArrangedSubview(settingsButton)
+        emptyPreeditToolbar.addArrangedSubview(resizeButton)
+        emptyPreeditToolbar.addArrangedSubview(spacer)
+
+        NSLayoutConstraint.activate([
+            settingsButton.widthAnchor.constraint(equalToConstant: 40),
+            resizeButton.widthAnchor.constraint(equalToConstant: 40)
+        ])
+    }
+
+    private func makeCandidateToolbarButton(
+        systemImageName: String,
+        accessibilityLabel: String,
+        action: Selector
+    ) -> UIButton {
+        let button = UIButton(type: .system)
+        var configuration = UIButton.Configuration.filled()
+        configuration.image = UIImage(systemName: systemImageName)
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 16,
+            weight: .semibold
+        )
+        configuration.baseBackgroundColor = KeyboardTheme.functionKeyBackground
+        configuration.baseForegroundColor = .label
+        configuration.cornerStyle = .medium
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 6, bottom: 6, trailing: 6)
+        button.configuration = configuration
+        button.accessibilityLabel = accessibilityLabel
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
+    }
+
+    @objc private func openKeyboardSettingsApp() {
+        resetMultiTapState()
+        hideFlickGuide()
+        hideKeyboardSelectionOverlay()
+        guard let url = KeyboardSettings.settingsURL else {
+            return
+        }
+        extensionContext?.open(url, completionHandler: nil)
+    }
+
+    @objc private func enterKeyboardResizeMode() {
+        guard resizeOverlayView == nil else {
+            return
+        }
+
+        resetMultiTapState()
+        hideFlickGuide()
+        hideKeyboardSelectionOverlay()
+        clearActiveKanaButton()
+        clearActiveQWERTYButton()
+        applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
+
+        var editableMetrics = currentLayoutMetrics
+        if editableMetrics.width == nil {
+            editableMetrics.width = Double(currentResizableKeyboardWidth())
+            applyKeyboardLayoutMetrics(editableMetrics, persists: false)
+        }
+
+        let overlay = UIView()
+        overlay.backgroundColor = .clear
+        overlay.isUserInteractionEnabled = true
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(overlay)
+        resizeOverlayView = overlay
+
+        addResizeOverlayControls(to: overlay)
+        addResizeHandles(to: overlay)
+
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        view.bringSubviewToFront(overlay)
+    }
+
+    private func addResizeOverlayControls(to overlay: UIView) {
+        let topStack = UIStackView()
+        topStack.axis = .horizontal
+        topStack.alignment = .center
+        topStack.distribution = .fill
+        topStack.spacing = 8
+        topStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let resetButton = makeResizeOverlayButton(
+            title: "デフォルト",
+            systemImageName: "arrow.counterclockwise",
+            action: #selector(resetKeyboardSizeToDefault)
+        )
+        let doneButton = makeResizeOverlayButton(
+            title: "完了",
+            systemImageName: "checkmark",
+            action: #selector(exitKeyboardResizeMode)
+        )
+        let topSpacer = UIView()
+        topSpacer.translatesAutoresizingMaskIntoConstraints = false
+        topStack.addArrangedSubview(resetButton)
+        topStack.addArrangedSubview(topSpacer)
+        topStack.addArrangedSubview(doneButton)
+
+        let bottomStack = UIStackView()
+        bottomStack.axis = .horizontal
+        bottomStack.alignment = .center
+        bottomStack.distribution = .fill
+        bottomStack.spacing = 8
+        bottomStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let removeMarginButton = makeResizeOverlayButton(
+            title: "下余白 -",
+            systemImageName: "minus",
+            action: #selector(removeKeyboardBottomMargin)
+        )
+        let addMarginButton = makeResizeOverlayButton(
+            title: "下余白 +",
+            systemImageName: "plus",
+            action: #selector(addKeyboardBottomMargin)
+        )
+        let bottomSpacer = UIView()
+        bottomSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomStack.addArrangedSubview(removeMarginButton)
+        bottomStack.addArrangedSubview(bottomSpacer)
+        bottomStack.addArrangedSubview(addMarginButton)
+
+        overlay.addSubview(topStack)
+        overlay.addSubview(bottomStack)
+
+        NSLayoutConstraint.activate([
+            topStack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 8),
+            topStack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
+            topStack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
+
+            bottomStack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 12),
+            bottomStack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -12),
+            bottomStack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -8)
+        ])
+    }
+
+    private func makeResizeOverlayButton(
+        title: String,
+        systemImageName: String,
+        action: Selector
+    ) -> UIButton {
+        let button = UIButton(type: .system)
+        var configuration = UIButton.Configuration.filled()
+        configuration.title = title
+        configuration.image = UIImage(systemName: systemImageName)
+        configuration.imagePadding = 5
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 13,
+            weight: .semibold
+        )
+        configuration.baseBackgroundColor = KeyboardTheme.popupBackground.withAlphaComponent(0.92)
+        configuration.baseForegroundColor = .label
+        configuration.cornerStyle = .medium
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 10, bottom: 7, trailing: 10)
+        button.configuration = configuration
+        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        button.addTarget(self, action: action, for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
+    }
+
+    private func addResizeHandles(to overlay: UIView) {
+        for position in ResizeHandlePosition.allCases {
+            let handle = ResizeHandleView(position: position)
+            let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handleResizePan(_:)))
+            handle.addGestureRecognizer(panGesture)
+            overlay.addSubview(handle)
+
+            NSLayoutConstraint.activate([
+                handle.widthAnchor.constraint(equalToConstant: 28),
+                handle.heightAnchor.constraint(equalToConstant: 28)
+            ])
+
+            switch position {
+            case .topLeft:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.leadingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.topAnchor)
+                ])
+            case .top:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.topAnchor)
+                ])
+            case .topRight:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.trailingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.topAnchor)
+                ])
+            case .right:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.trailingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.centerYAnchor)
+                ])
+            case .bottomRight:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.trailingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.bottomAnchor)
+                ])
+            case .bottom:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.bottomAnchor)
+                ])
+            case .bottomLeft:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.leadingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.bottomAnchor)
+                ])
+            case .left:
+                NSLayoutConstraint.activate([
+                    handle.centerXAnchor.constraint(equalTo: overlay.leadingAnchor),
+                    handle.centerYAnchor.constraint(equalTo: overlay.centerYAnchor)
+                ])
+            }
+        }
+    }
+
+    @objc private func handleResizePan(_ gesture: UIPanGestureRecognizer) {
+        guard let handle = gesture.view as? ResizeHandleView else {
+            return
+        }
+
+        let translation = gesture.translation(in: view)
+        guard translation != .zero else {
+            return
+        }
+
+        var metrics = currentLayoutMetrics
+        var width = CGFloat(metrics.width ?? Double(currentResizableKeyboardWidth()))
+        var height = CGFloat(metrics.height)
+
+        if handle.position.horizontalSign != 0 {
+            width += translation.x * handle.position.horizontalSign
+        }
+        if handle.position.verticalSign != 0 {
+            height += translation.y * handle.position.verticalSign
+        }
+
+        metrics.width = Double(width)
+        metrics.height = Double(height)
+        applyKeyboardLayoutMetrics(metrics, persists: true)
+        gesture.setTranslation(.zero, in: view)
+    }
+
+    @objc private func resetKeyboardSizeToDefault() {
+        let orientation = currentKeyboardOrientation()
+        KeyboardSettings.resetKeyboardLayoutMetrics(for: orientation)
+        let metrics = KeyboardSettings.KeyboardLayoutMetrics(
+            width: nil,
+            height: KeyboardSettings.defaultKeyboardHeight,
+            bottomMargin: KeyboardSettings.defaultKeyboardBottomMargin
+        )
+        appliedKeyboardOrientation = orientation
+        applyKeyboardLayoutMetrics(metrics, persists: false)
+    }
+
+    @objc private func addKeyboardBottomMargin() {
+        adjustKeyboardBottomMargin(by: keyboardBottomMarginStep)
+    }
+
+    @objc private func removeKeyboardBottomMargin() {
+        adjustKeyboardBottomMargin(by: -keyboardBottomMarginStep)
+    }
+
+    private func adjustKeyboardBottomMargin(by delta: CGFloat) {
+        var metrics = currentLayoutMetrics
+        let nextMargin = CGFloat(metrics.bottomMargin) + delta
+        metrics.bottomMargin = Double(nextMargin)
+        applyKeyboardLayoutMetrics(metrics, persists: true)
+    }
+
+    @objc private func exitKeyboardResizeMode() {
+        resizeOverlayView?.removeFromSuperview()
+        resizeOverlayView = nil
+    }
+
+    private func applyStoredKeyboardLayoutMetricsIfNeeded(force: Bool = false) {
+        let orientation = currentKeyboardOrientation()
+        guard force || appliedKeyboardOrientation != orientation else {
+            return
+        }
+
+        appliedKeyboardOrientation = orientation
+        let metrics = KeyboardSettings.keyboardLayoutMetrics(for: orientation)
+        applyKeyboardLayoutMetrics(metrics, persists: false)
+    }
+
+    private func applyKeyboardLayoutMetrics(
+        _ metrics: KeyboardSettings.KeyboardLayoutMetrics,
+        persists: Bool
+    ) {
+        let orientation = currentKeyboardOrientation()
+        let sanitizedMetrics = sanitizedKeyboardLayoutMetrics(metrics, orientation: orientation)
+        currentLayoutMetrics = sanitizedMetrics
+
+        if let width = sanitizedMetrics.width {
+            if keyboardWidthConstraint == nil {
+                let widthConstraint = view.widthAnchor.constraint(equalToConstant: CGFloat(width))
+                widthConstraint.priority = UILayoutPriority(999)
+                keyboardWidthConstraint = widthConstraint
+                widthConstraint.isActive = true
+            }
+            keyboardWidthConstraint?.constant = CGFloat(width)
+        } else {
+            keyboardWidthConstraint?.isActive = false
+            keyboardWidthConstraint = nil
+        }
+
+        keyboardHeightConstraint?.constant = CGFloat(sanitizedMetrics.height)
+        contentBottomConstraint?.constant = -CGFloat(sanitizedMetrics.bottomMargin)
+
+        if persists {
+            KeyboardSettings.saveKeyboardLayoutMetrics(sanitizedMetrics, for: orientation)
+        }
+
+        view.setNeedsLayout()
+    }
+
+    private func sanitizedKeyboardLayoutMetrics(
+        _ metrics: KeyboardSettings.KeyboardLayoutMetrics,
+        orientation: KeyboardSettings.KeyboardOrientation
+    ) -> KeyboardSettings.KeyboardLayoutMetrics {
+        let maximumWidth = keyboardMaximumWidth(for: orientation)
+        let width = metrics.width.map {
+            min(max($0, Double(keyboardMinimumWidth)), Double(maximumWidth))
+        }
+        let height = min(max(metrics.height, Double(keyboardMinimumHeight)), Double(keyboardMaximumHeight))
+        let bottomMargin = min(
+            max(metrics.bottomMargin, 0),
+            Double(keyboardMaximumBottomMargin)
+        )
+
+        return KeyboardSettings.KeyboardLayoutMetrics(
+            width: width,
+            height: height,
+            bottomMargin: bottomMargin
+        )
+    }
+
+    private func currentResizableKeyboardWidth() -> CGFloat {
+        if let width = currentLayoutMetrics.width {
+            return CGFloat(width)
+        }
+        if view.bounds.width > 0 {
+            return view.bounds.width
+        }
+        return defaultKeyboardWidth(for: currentKeyboardOrientation())
+    }
+
+    private func currentKeyboardOrientation() -> KeyboardSettings.KeyboardOrientation {
+        if let interfaceOrientation = view.window?.windowScene?.interfaceOrientation {
+            return interfaceOrientation.isLandscape ? .landscape : .portrait
+        }
+
+        let screenSize = UIScreen.main.bounds.size
+        return screenSize.width > screenSize.height ? .landscape : .portrait
+    }
+
+    private func defaultKeyboardWidth(for orientation: KeyboardSettings.KeyboardOrientation) -> CGFloat {
+        let screenSize = view.window?.windowScene?.screen.bounds.size ?? UIScreen.main.bounds.size
+        switch orientation {
+        case .portrait:
+            return min(screenSize.width, screenSize.height)
+        case .landscape:
+            return max(screenSize.width, screenSize.height)
+        }
+    }
+
+    private func keyboardMaximumWidth(for orientation: KeyboardSettings.KeyboardOrientation) -> CGFloat {
+        max(
+            defaultKeyboardWidth(for: orientation),
+            view.superview?.bounds.width ?? 0,
+            view.bounds.width
+        )
     }
 
     private func rebuildKeyboardLayout() {
@@ -1940,6 +2448,7 @@ final class KeyboardViewController: UIInputViewController {
         button.addTarget(self, action: #selector(handleTouchDrag(_:event:)), for: [.touchDragInside, .touchDragOutside])
         button.addTarget(self, action: #selector(handleKeyRelease(_:event:)), for: [.touchUpInside, .touchUpOutside])
         button.addTarget(self, action: #selector(handleTouchCancel(_:)), for: .touchCancel)
+        button.usesTapOnlyHighlight = keyRequiringFlickTracking(from: button.action) != nil
 
         if case .kana = button.action {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
@@ -1986,7 +2495,6 @@ final class KeyboardViewController: UIInputViewController {
         activeKanaButton = sender
         activeKanaTouch = touch(for: sender, event: event)
         activeFlickDirection = .center
-        sender.isHighlighted = true
         hideFlickGuide()
     }
 
@@ -2002,7 +2510,6 @@ final class KeyboardViewController: UIInputViewController {
 
         activeKanaButton = sender
         activeKanaTouch = touch(for: sender, event: event) ?? activeKanaTouch
-        sender.isHighlighted = true
         let direction = flickDirection(for: sender, event: event)
         if direction == .center, flickGuideView.showsAllDirections == false {
             activeFlickDirection = .center
@@ -2043,7 +2550,6 @@ final class KeyboardViewController: UIInputViewController {
         releaseActiveKanaButtonIfNeeded(beforeActivating: button)
         activeKanaButton = button
         activeFlickDirection = .center
-        button.isHighlighted = true
         showFlickGuide(for: key, from: button, selectedDirection: .center, mode: .longPress)
     }
 
@@ -2064,6 +2570,12 @@ final class KeyboardViewController: UIInputViewController {
             activeFlickDirection = .center
             hideFlickGuide()
             return
+        }
+
+        if currentSumireKeyboard.kind != .qwerty,
+           keyRequiringFlickTracking(from: releasedButton.action) != nil,
+           activeFlickDirection == .center {
+            releasedButton.flashTapHighlight()
         }
 
         performKeyAction(releasedButton.action)
@@ -2688,11 +3200,18 @@ final class KeyboardViewController: UIInputViewController {
 
         let candidates = currentCandidateTexts()
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
+        let showsEmptyToolbar = shouldShowEmptyPreeditToolbar
 
         candidateButtons.removeAll()
         for view in candidateStack.arrangedSubviews {
             candidateStack.removeArrangedSubview(view)
             view.removeFromSuperview()
+        }
+        updateCandidateBarMode(showsEmptyPreeditToolbar: showsEmptyToolbar)
+
+        if showsEmptyToolbar {
+            candidateScrollView.setContentOffset(.zero, animated: false)
+            return
         }
 
         if mainKeyboardPanel == .emoji {
@@ -2722,6 +3241,18 @@ final class KeyboardViewController: UIInputViewController {
             scrollCandidateIntoView(at: selectedCandidateIndex)
         } else {
             candidateScrollView.setContentOffset(.zero, animated: false)
+        }
+    }
+
+    private var shouldShowEmptyPreeditToolbar: Bool {
+        mainKeyboardPanel != .emoji && composingText.isEmpty
+    }
+
+    private func updateCandidateBarMode(showsEmptyPreeditToolbar: Bool) {
+        emptyPreeditToolbar.isHidden = showsEmptyPreeditToolbar == false
+        candidateScrollView.isHidden = showsEmptyPreeditToolbar
+        if showsEmptyPreeditToolbar {
+            preeditReadingView.clear()
         }
     }
 
@@ -3434,6 +3965,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func syncSharedSettings() {
         let shouldApplyKeyboard = syncSumireKeyboardSettings()
+        applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
 
         let nextLiveConversionEnabled = KeyboardSettings.liveConversionEnabled
         var shouldRenderComposition = false
@@ -3497,6 +4029,7 @@ final class KeyboardViewController: UIInputViewController {
         commitRenderedComposingTextAsTyped()
         resetMultiTapState()
         hideKeyboardSelectionOverlay()
+        exitKeyboardResizeMode()
         lastKeyboardSwitchButton = nil
         lastKeyboardSwitchEvent = nil
         mainKeyboardPanel = .text

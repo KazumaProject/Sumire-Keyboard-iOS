@@ -8,6 +8,12 @@ enum KeyboardSettings {
         static let usesHalfWidthSpace = "SumireKeyboardUsesHalfWidthSpace"
         static let keyboards = "SumireKeyboardKeyboards"
         static let currentKeyboardID = "SumireKeyboardCurrentKeyboardID"
+        static let keyboardWidthPortrait = "SumireKeyboardWidthPortrait"
+        static let keyboardHeightPortrait = "SumireKeyboardHeightPortrait"
+        static let keyboardBottomMarginPortrait = "SumireKeyboardBottomMarginPortrait"
+        static let keyboardWidthLandscape = "SumireKeyboardWidthLandscape"
+        static let keyboardHeightLandscape = "SumireKeyboardHeightLandscape"
+        static let keyboardBottomMarginLandscape = "SumireKeyboardBottomMarginLandscape"
     }
 
     enum JapaneseFlickInputMode: String, CaseIterable, Identifiable {
@@ -87,7 +93,48 @@ enum KeyboardSettings {
         }
     }
 
+    enum KeyboardOrientation {
+        case portrait
+        case landscape
+
+        var widthKey: String {
+            switch self {
+            case .portrait:
+                return Keys.keyboardWidthPortrait
+            case .landscape:
+                return Keys.keyboardWidthLandscape
+            }
+        }
+
+        var heightKey: String {
+            switch self {
+            case .portrait:
+                return Keys.keyboardHeightPortrait
+            case .landscape:
+                return Keys.keyboardHeightLandscape
+            }
+        }
+
+        var bottomMarginKey: String {
+            switch self {
+            case .portrait:
+                return Keys.keyboardBottomMarginPortrait
+            case .landscape:
+                return Keys.keyboardBottomMarginLandscape
+            }
+        }
+    }
+
+    struct KeyboardLayoutMetrics: Equatable {
+        var width: Double?
+        var height: Double
+        var bottomMargin: Double
+    }
+
     static let appGroupIdentifier = "group.com.kazumaproject.sumire-keyboard"
+    static let settingsURL = URL(string: "sumirekeyboard://settings")
+    static let defaultKeyboardHeight: Double = 292
+    static let defaultKeyboardBottomMargin: Double = 8
 
     static var defaults: UserDefaults {
         UserDefaults(suiteName: appGroupIdentifier) ?? .standard
@@ -141,6 +188,54 @@ enum KeyboardSettings {
 
     static var spaceText: String {
         usesHalfWidthSpace ? " " : "　"
+    }
+
+    static func keyboardLayoutMetrics(for orientation: KeyboardOrientation) -> KeyboardLayoutMetrics {
+        let width: Double?
+        if defaults.object(forKey: orientation.widthKey) == nil {
+            width = nil
+        } else {
+            width = defaults.double(forKey: orientation.widthKey)
+        }
+
+        let height: Double
+        if defaults.object(forKey: orientation.heightKey) == nil {
+            height = defaultKeyboardHeight
+        } else {
+            height = defaults.double(forKey: orientation.heightKey)
+        }
+
+        let bottomMargin: Double
+        if defaults.object(forKey: orientation.bottomMarginKey) == nil {
+            bottomMargin = defaultKeyboardBottomMargin
+        } else {
+            bottomMargin = defaults.double(forKey: orientation.bottomMarginKey)
+        }
+
+        return KeyboardLayoutMetrics(
+            width: width,
+            height: height,
+            bottomMargin: bottomMargin
+        )
+    }
+
+    static func saveKeyboardLayoutMetrics(
+        _ metrics: KeyboardLayoutMetrics,
+        for orientation: KeyboardOrientation
+    ) {
+        if let width = metrics.width {
+            defaults.set(width, forKey: orientation.widthKey)
+        } else {
+            defaults.removeObject(forKey: orientation.widthKey)
+        }
+        defaults.set(metrics.height, forKey: orientation.heightKey)
+        defaults.set(metrics.bottomMargin, forKey: orientation.bottomMarginKey)
+    }
+
+    static func resetKeyboardLayoutMetrics(for orientation: KeyboardOrientation) {
+        defaults.removeObject(forKey: orientation.widthKey)
+        defaults.removeObject(forKey: orientation.heightKey)
+        defaults.removeObject(forKey: orientation.bottomMarginKey)
     }
 
     static var keyboards: [SumireKeyboard] {
