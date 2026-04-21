@@ -178,6 +178,7 @@ final class KeyboardViewController: UIInputViewController {
             layer.shadowOpacity = style.shadowOpacity
             layer.shadowRadius = 1
             layer.shadowOffset = CGSize(width: 0, height: 1)
+            isMultipleTouchEnabled = true
             translatesAutoresizingMaskIntoConstraints = false
         }
 
@@ -906,10 +907,14 @@ final class KeyboardViewController: UIInputViewController {
     private let flickThreshold: CGFloat = 22
     private var suppressNextButtonRelease = false
     private weak var activeKanaButton: KeyboardButton?
+    private weak var activeKanaTouch: UITouch?
     private weak var spaceButton: KeyboardButton?
     private weak var activeQWERTYButton: KeyboardButton?
+    private weak var activeQWERTYTouch: UITouch?
     private var qwertyButtons: [KeyboardButton] = []
     private var activeFlickDirection: FlickDirection = .center
+    private var suppressedReleaseTouchIDs = Set<ObjectIdentifier>()
+    private var suppressedReleaseButtonIDs = Set<ObjectIdentifier>()
     private var deleteRepeatTimer: Timer?
     private var cursorRepeatTimer: Timer?
     private var reverseCycleStateTimer: Timer?
@@ -928,6 +933,7 @@ final class KeyboardViewController: UIInputViewController {
     override func loadView() {
         let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
         inputView.allowsSelfSizing = true
+        inputView.isMultipleTouchEnabled = true
         view = inputView
     }
 
@@ -1072,7 +1078,10 @@ final class KeyboardViewController: UIInputViewController {
         reverseCycleButton = nil
         modeSwitchButton = nil
         spaceButton = nil
-        activeQWERTYButton = nil
+        clearActiveKanaButton()
+        clearActiveQWERTYButton()
+        suppressedReleaseTouchIDs.removeAll()
+        suppressedReleaseButtonIDs.removeAll()
         qwertyButtons.removeAll()
 
         if currentSumireKeyboard.kind == .qwerty {
@@ -1718,7 +1727,7 @@ final class KeyboardViewController: UIInputViewController {
         stack.distribution = .fill
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-
+//
         let icon = UIImageView(image: UIImage(systemName: "face.smiling"))
         icon.tintColor = .secondaryLabel
         icon.contentMode = .scaleAspectFit
@@ -1881,10 +1890,6 @@ final class KeyboardViewController: UIInputViewController {
 
         let deleteButton = KeyboardButton(title: "⌫", action: .delete, style: .function)
         configureInputTargets(for: deleteButton)
-        let deleteLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
-        deleteLongPress.minimumPressDuration = 0.35
-        deleteLongPress.cancelsTouchesInView = false
-        deleteButton.addGestureRecognizer(deleteLongPress)
         column.addArrangedSubview(deleteButton)
         buttons.append(deleteButton)
 
@@ -1956,21 +1961,30 @@ final class KeyboardViewController: UIInputViewController {
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
+        } else if case .delete = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
         }
     }
 
     @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
         if currentSumireKeyboard.kind == .qwerty, isQWERTYSelectableAction(sender.action) {
+            releaseActiveQWERTYButtonIfNeeded(beforeActivating: sender)
             setActiveQWERTYButton(sender)
+            activeQWERTYTouch = touch(for: sender, event: event)
             hideFlickGuide()
             return
         }
 
+        releaseActiveKanaButtonIfNeeded(beforeActivating: sender)
         guard keyRequiringFlickTracking(from: sender.action) != nil else {
             return
         }
 
         activeKanaButton = sender
+        activeKanaTouch = touch(for: sender, event: event)
         activeFlickDirection = .center
         sender.isHighlighted = true
         hideFlickGuide()
@@ -1987,6 +2001,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         activeKanaButton = sender
+        activeKanaTouch = touch(for: sender, event: event) ?? activeKanaTouch
         sender.isHighlighted = true
         let direction = flickDirection(for: sender, event: event)
         if direction == .center, flickGuideView.showsAllDirections == false {
@@ -2005,6 +2020,11 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchCancel(_ sender: KeyboardButton) {
+        if shouldSuppressRelease(for: sender, event: nil) {
+            sender.isHighlighted = false
+            return
+        }
+
         stopDeleteRepeat()
         stopCursorRepeat()
         clearActiveKanaButton()
@@ -2020,6 +2040,7 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        releaseActiveKanaButtonIfNeeded(beforeActivating: button)
         activeKanaButton = button
         activeFlickDirection = .center
         button.isHighlighted = true
@@ -2031,6 +2052,11 @@ final class KeyboardViewController: UIInputViewController {
             ? (activeQWERTYButton ?? sender)
             : sender
 
+        if shouldSuppressRelease(for: sender, event: event) {
+            sender.isHighlighted = false
+            return
+        }
+
         if suppressNextButtonRelease {
             suppressNextButtonRelease = false
             clearActiveKanaButton()
@@ -2040,7 +2066,16 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
-        switch releasedButton.action {
+        performKeyAction(releasedButton.action)
+
+        clearActiveKanaButton()
+        clearActiveQWERTYButton()
+        activeFlickDirection = .center
+        hideFlickGuide()
+    }
+
+    private func performKeyAction(_ action: KeyAction) {
+        switch action {
         case .kana(let key):
             insertCandidate(for: key, direction: activeFlickDirection)
         case .flickOnly(let key):
@@ -2098,11 +2133,6 @@ final class KeyboardViewController: UIInputViewController {
             resetMultiTapState()
             handleEnterKey()
         }
-
-        clearActiveKanaButton()
-        clearActiveQWERTYButton()
-        activeFlickDirection = .center
-        hideFlickGuide()
     }
 
     @objc private func handleKeyboardSwitchTouchDown(_ sender: KeyboardButton, event: UIEvent) {
@@ -2193,7 +2223,7 @@ final class KeyboardViewController: UIInputViewController {
             suppressNextButtonRelease = true
             resetMultiTapState()
             hideFlickGuide()
-            deleteBackward()
+            handleDeleteKey()
             startDeleteRepeat()
         case .ended, .cancelled, .failed:
             stopDeleteRepeat()
@@ -2227,8 +2257,68 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private func releaseActiveKanaButtonIfNeeded(beforeActivating nextButton: KeyboardButton) {
+        guard let button = activeKanaButton,
+              button !== nextButton else {
+            return
+        }
+
+        suppressRelease(for: activeKanaTouch, button: button)
+        performKeyAction(button.action)
+        clearActiveKanaButton()
+        activeFlickDirection = .center
+        hideFlickGuide()
+    }
+
+    private func releaseActiveQWERTYButtonIfNeeded(beforeActivating nextButton: KeyboardButton) {
+        guard let button = activeQWERTYButton,
+              button !== nextButton else {
+            return
+        }
+
+        suppressRelease(for: activeQWERTYTouch, button: button)
+        performKeyAction(button.action)
+        clearActiveQWERTYButton()
+    }
+
+    private func touch(for button: KeyboardButton, event: UIEvent) -> UITouch? {
+        event.touches(for: button)?.first
+    }
+
+    private func suppressRelease(for touch: UITouch?, button: KeyboardButton) {
+        if let touch {
+            suppressedReleaseTouchIDs.insert(ObjectIdentifier(touch))
+        }
+        suppressedReleaseButtonIDs.insert(ObjectIdentifier(button))
+    }
+
+    private func shouldSuppressRelease(for button: KeyboardButton, event: UIEvent?) -> Bool {
+        let buttonIdentifier = ObjectIdentifier(button)
+        if suppressedReleaseButtonIDs.remove(buttonIdentifier) != nil {
+            if let touches = event?.touches(for: button) {
+                for touch in touches {
+                    suppressedReleaseTouchIDs.remove(ObjectIdentifier(touch))
+                }
+            }
+            return true
+        }
+
+        guard let touches = event?.touches(for: button) else {
+            return false
+        }
+
+        for touch in touches {
+            let identifier = ObjectIdentifier(touch)
+            if suppressedReleaseTouchIDs.remove(identifier) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func flickDirection(for button: KeyboardButton, event: UIEvent) -> FlickDirection {
-        guard let touch = event.touches(for: button)?.first ?? event.allTouches?.first else {
+        guard let touch = event.touches(for: button)?.first ?? activeKanaTouch ?? event.allTouches?.first else {
             return .center
         }
 
@@ -2438,6 +2528,7 @@ final class KeyboardViewController: UIInputViewController {
     private func clearActiveKanaButton() {
         activeKanaButton?.isHighlighted = false
         activeKanaButton = nil
+        activeKanaTouch = nil
     }
 
     private func setActiveQWERTYButton(_ button: KeyboardButton?) {
@@ -2454,6 +2545,7 @@ final class KeyboardViewController: UIInputViewController {
     private func clearActiveQWERTYButton() {
         activeQWERTYButton?.isHighlighted = false
         activeQWERTYButton = nil
+        activeQWERTYTouch = nil
     }
 
     private func showKeyboardSelectionOverlay() {
@@ -2530,7 +2622,7 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         let locationInView: CGPoint
-        if let touch = event.allTouches?.first {
+        if let touch = activeQWERTYTouch ?? event.allTouches?.first {
             locationInView = touch.location(in: view)
         } else {
             locationInView = fallback.convert(
@@ -3795,7 +3887,7 @@ final class KeyboardViewController: UIInputViewController {
     private func startDeleteRepeat() {
         stopDeleteRepeat()
         let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
-            self?.deleteBackward()
+            self?.handleDeleteKey()
         }
         deleteRepeatTimer = timer
         RunLoop.main.add(timer, forMode: .common)
