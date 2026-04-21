@@ -1042,11 +1042,6 @@ final class KeyboardViewController: UIInputViewController {
     private var reverseCycleStateTimer: Timer?
     private weak var reverseCycleButton: KeyboardButton?
     private weak var modeSwitchButton: KeyboardButton?
-    private var keyboardSwitchLongPressTimer: Timer?
-    private var shouldSuppressNextKeyboardTap = false
-    private weak var lastKeyboardSwitchButton: KeyboardButton?
-    private var lastKeyboardSwitchEvent: UIEvent?
-    private weak var keyboardSelectionOverlay: UIView?
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private var keyboardHeightConstraint: NSLayoutConstraint?
@@ -1113,8 +1108,6 @@ final class KeyboardViewController: UIInputViewController {
         stopDeleteRepeat()
         stopCursorRepeat()
         stopReverseCycleStateTimer()
-        stopKeyboardSwitchLongPressTimer()
-        hideKeyboardSelectionOverlay()
         exitKeyboardResizeMode()
         commitRenderedComposingTextAsTyped()
     }
@@ -1286,7 +1279,6 @@ final class KeyboardViewController: UIInputViewController {
     @objc private func openKeyboardSettingsApp() {
         resetMultiTapState()
         hideFlickGuide()
-        hideKeyboardSelectionOverlay()
         guard let url = KeyboardSettings.settingsURL else {
             return
         }
@@ -1300,7 +1292,6 @@ final class KeyboardViewController: UIInputViewController {
 
         resetMultiTapState()
         hideFlickGuide()
-        hideKeyboardSelectionOverlay()
         clearActiveKanaButton()
         clearActiveQWERTYButton()
         applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
@@ -2529,23 +2520,9 @@ final class KeyboardViewController: UIInputViewController {
     private func configureKeyboardSwitchTargets(for button: KeyboardButton) {
         button.addTarget(
             self,
-            action: #selector(handleKeyboardSwitchTouchDown(_:event:)),
-            for: .touchDown
+            action: #selector(handleKeyboardSwitchInputModeList(_:event:)),
+            for: .allTouchEvents
         )
-        button.addTarget(
-            self,
-            action: #selector(handleKeyboardSwitchTouchUp(_:event:)),
-            for: [.touchUpInside, .touchUpOutside]
-        )
-        button.addTarget(
-            self,
-            action: #selector(handleKeyboardSwitchTouchCancel(_:)),
-            for: .touchCancel
-        )
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKeyboardSwitchLongPress(_:)))
-        longPress.minimumPressDuration = 0.35
-        longPress.cancelsTouchesInView = false
-        button.addGestureRecognizer(longPress)
     }
 
     private func makeControlColumn() -> UIStackView {
@@ -2808,65 +2785,14 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    @objc private func handleKeyboardSwitchTouchDown(_ sender: KeyboardButton, event: UIEvent) {
-        resetMultiTapState()
-        hideFlickGuide()
-        hideKeyboardSelectionOverlay()
-        shouldSuppressNextKeyboardTap = false
-        lastKeyboardSwitchButton = sender
-        lastKeyboardSwitchEvent = event
-        stopKeyboardSwitchLongPressTimer()
-
-        let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
-            self?.shouldSuppressNextKeyboardTap = true
-            self?.commitRenderedComposingTextAsTyped()
-        }
-        keyboardSwitchLongPressTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    @objc private func handleKeyboardSwitchTouchUp(_ sender: KeyboardButton, event: UIEvent) {
-        stopKeyboardSwitchLongPressTimer()
-        guard shouldSuppressNextKeyboardTap == false else {
-            shouldSuppressNextKeyboardTap = false
-            lastKeyboardSwitchButton = nil
-            lastKeyboardSwitchEvent = nil
-            return
+    @objc private func handleKeyboardSwitchInputModeList(_ sender: KeyboardButton, event: UIEvent) {
+        if event.touches(for: sender)?.contains(where: { $0.phase == .began }) == true {
+            resetMultiTapState()
+            hideFlickGuide()
+            commitRenderedComposingTextAsTyped()
         }
 
-        commitRenderedComposingTextAsTyped()
-        if advanceToNextSumireKeyboardIfAvailable() == false {
-            advanceToNextInputMode()
-        }
-        lastKeyboardSwitchButton = nil
-        lastKeyboardSwitchEvent = nil
-    }
-
-    @objc private func handleKeyboardSwitchTouchCancel(_ sender: KeyboardButton) {
-        stopKeyboardSwitchLongPressTimer()
-        shouldSuppressNextKeyboardTap = false
-        lastKeyboardSwitchButton = nil
-        lastKeyboardSwitchEvent = nil
-    }
-
-    @objc private func handleKeyboardSwitchLongPress(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began else {
-            return
-        }
-
-        shouldSuppressNextKeyboardTap = true
-        stopKeyboardSwitchLongPressTimer()
-        resetMultiTapState()
-        hideFlickGuide()
-        commitRenderedComposingTextAsTyped()
-
-        sumireKeyboards = KeyboardSettings.keyboards
-        if sumireKeyboards.count > 1 {
-            showKeyboardSelectionOverlay()
-        } else if let button = lastKeyboardSwitchButton,
-                  let event = lastKeyboardSwitchEvent {
-            handleInputModeList(from: button, with: event)
-        }
+        handleInputModeList(from: sender, with: event)
     }
 
     @objc private func commitCandidate(_ sender: CandidateButton) {
@@ -3219,74 +3145,6 @@ final class KeyboardViewController: UIInputViewController {
         activeQWERTYButton?.isHighlighted = false
         activeQWERTYButton = nil
         activeQWERTYTouch = nil
-    }
-
-    private func showKeyboardSelectionOverlay() {
-        hideKeyboardSelectionOverlay()
-        sumireKeyboards = KeyboardSettings.keyboards
-        guard sumireKeyboards.count > 1 else {
-            return
-        }
-
-        let overlay = UIView()
-        overlay.backgroundColor = KeyboardTheme.popupBackground
-        overlay.layer.cornerRadius = 8
-        overlay.layer.borderWidth = 0.5
-        overlay.layer.borderColor = KeyboardTheme.popupStroke.resolvedColor(with: traitCollection).cgColor
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.alignment = .fill
-        stack.distribution = .fill
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        for keyboard in sumireKeyboards {
-            let button = CandidateButton()
-            button.configure(
-                title: keyboard.name,
-                committedText: keyboard.id,
-                isEnabled: true,
-                isSelected: keyboard.id == currentSumireKeyboard.id
-            )
-            button.addTarget(self, action: #selector(selectKeyboardFromOverlay(_:)), for: .touchUpInside)
-            stack.addArrangedSubview(button)
-        }
-
-        overlay.addSubview(stack)
-        view.addSubview(overlay)
-        keyboardSelectionOverlay = overlay
-
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 8),
-            stack.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -8),
-            stack.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -8),
-
-            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            overlay.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -8),
-            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
-            overlay.widthAnchor.constraint(lessThanOrEqualToConstant: 260)
-        ])
-    }
-
-    private func hideKeyboardSelectionOverlay() {
-        keyboardSelectionOverlay?.removeFromSuperview()
-        keyboardSelectionOverlay = nil
-    }
-
-    @objc private func selectKeyboardFromOverlay(_ sender: CandidateButton) {
-        guard let keyboardID = sender.committedText,
-              let keyboard = KeyboardSettings.keyboards.first(where: { $0.id == keyboardID }) else {
-            hideKeyboardSelectionOverlay()
-            return
-        }
-
-        KeyboardSettings.currentKeyboardID = keyboard.id
-        currentSumireKeyboard = keyboard
-        hideKeyboardSelectionOverlay()
-        applyCurrentSumireKeyboard()
     }
 
     private func updateActiveQWERTYButton(from event: UIEvent, fallback: KeyboardButton) {
@@ -4189,10 +4047,7 @@ final class KeyboardViewController: UIInputViewController {
     private func applyCurrentSumireKeyboard() {
         commitRenderedComposingTextAsTyped()
         resetMultiTapState()
-        hideKeyboardSelectionOverlay()
         exitKeyboardResizeMode()
-        lastKeyboardSwitchButton = nil
-        lastKeyboardSwitchEvent = nil
         mainKeyboardPanel = .text
         qwertyMode = .normal
         qwertyShiftEnabled = false
@@ -4609,11 +4464,6 @@ final class KeyboardViewController: UIInputViewController {
     private func stopReverseCycleStateTimer() {
         reverseCycleStateTimer?.invalidate()
         reverseCycleStateTimer = nil
-    }
-
-    private func stopKeyboardSwitchLongPressTimer() {
-        keyboardSwitchLongPressTimer?.invalidate()
-        keyboardSwitchLongPressTimer = nil
     }
 
     private func handleCursorRepeat(for action: KeyAction) {
