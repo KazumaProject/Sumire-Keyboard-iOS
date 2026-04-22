@@ -199,6 +199,57 @@ public struct KanaKanjiConverter: Sendable {
         }
     }
 
+    public func commonPrefixCandidates(
+        _ input: String,
+        options: ConversionOptions = ConversionOptions(),
+        limit: Int = 50
+    ) -> [ConversionCandidate] {
+        guard input.count > 1, limit > 0 else {
+            return []
+        }
+
+        let characters = Array(input)
+        let matches = dictionary.prefixMatches(
+            in: characters,
+            from: 0,
+            mode: graphSearchMode(for: options.yomiSearchMode),
+            predictivePrefixLength: max(1, options.predictivePrefixLength)
+        )
+
+        var bestByText: [String: ConversionCandidate] = [:]
+        bestByText.reserveCapacity(limit)
+
+        for match in matches where match.length < characters.count {
+            let penaltyCost = match.penalty * options.omissionPenaltyWeight
+            for entry in match.entries {
+                let candidate = ConversionCandidate(
+                    text: entry.surface,
+                    reading: entry.yomi,
+                    score: entry.cost + penaltyCost,
+                    consumedLength: match.length
+                )
+
+                if let current = bestByText[entry.surface] {
+                    if candidate.score < current.score {
+                        bestByText[entry.surface] = candidate
+                    }
+                } else {
+                    bestByText[entry.surface] = candidate
+                }
+            }
+        }
+
+        return bestByText.values.sorted {
+            if $0.reading.count != $1.reading.count {
+                return $0.reading.count > $1.reading.count
+            }
+            if $0.score != $1.score {
+                return $0.score < $1.score
+            }
+            return $0.text < $1.text
+        }.prefix(limit).map { $0 }
+    }
+
     private func predictiveMaxYomiLength(forInputLength inputLength: Int) -> Int? {
         inputLength < 6 ? inputLength + 2 : nil
     }

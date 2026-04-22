@@ -20,11 +20,13 @@ public struct ConversionCandidate: Equatable, Sendable {
     public let text: String
     public let reading: String
     public let score: Int
+    public let consumedLength: Int?
 
-    public init(text: String, reading: String, score: Int) {
+    public init(text: String, reading: String, score: Int, consumedLength: Int? = nil) {
         self.text = text
         self.reading = reading
         self.score = score
+        self.consumedLength = consumedLength
     }
 }
 
