@@ -462,6 +462,9 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
     private final class CandidateListCell: UICollectionViewCell {
         static let reuseIdentifier = "CandidateListCell"
+        private static let maximumTitleWidth: CGFloat = 220
+        private static let minimumCellWidth: CGFloat = 44
+        private static let minimumCellHeight: CGFloat = 30
 
         private let titleLabel = UILabel()
         private let dividerLabel = UILabel()
@@ -476,10 +479,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
             titleLabel.font = .systemFont(ofSize: 15, weight: .medium)
             titleLabel.textColor = .label
-            titleLabel.numberOfLines = 1
-            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.numberOfLines = 0
+            titleLabel.lineBreakMode = .byCharWrapping
             titleLabel.setContentHuggingPriority(.required, for: .horizontal)
-            titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+            titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
             dividerLabel.text = "｜"
             dividerLabel.font = .systemFont(ofSize: 14, weight: .regular)
@@ -502,8 +505,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
                 contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4),
                 contentStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
-                titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
-                contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 30)
+                titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.maximumTitleWidth),
+                contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumCellHeight)
             ])
         }
 
@@ -527,8 +530,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             let fittingSize = contentView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
             let attributes = layoutAttributes.copy() as? UICollectionViewLayoutAttributes ?? layoutAttributes
             attributes.frame.size = CGSize(
-                width: ceil(fittingSize.width),
-                height: max(30, ceil(fittingSize.height))
+                width: max(Self.minimumCellWidth, ceil(fittingSize.width)),
+                height: max(Self.minimumCellHeight, ceil(fittingSize.height))
             )
             return attributes
         }
@@ -2064,6 +2067,12 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             CandidateListCell.self,
             forCellWithReuseIdentifier: CandidateListCell.reuseIdentifier
         )
+        DispatchQueue.main.async { [weak self, weak collectionView] in
+            guard let self, let collectionView else {
+                return
+            }
+            self.scrollCandidateListPastFirstRowIfPossible(collectionView)
+        }
 
         // 候補がない場合も一覧モードのままにし、下段全体に明示的な空状態を表示する。
         collectionView.backgroundView = candidateListCandidates.isEmpty ? makeCandidateListPlaceholderView() : nil
@@ -2085,6 +2094,42 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         candidateListSelectedCandidateIndex = currentSelectedCandidateIndex(
             candidateCount: candidateListCandidates.count
         )
+    }
+
+    private func scrollCandidateListPastFirstRowIfPossible(_ collectionView: UICollectionView) {
+        guard collectionView === candidateListCollectionView else {
+            return
+        }
+
+        collectionView.layoutIfNeeded()
+
+        guard collectionView.bounds.height > 0,
+              collectionView.contentSize.height > collectionView.bounds.height,
+              candidateListCandidates.count > 1 else {
+            return
+        }
+
+        let attributes = candidateListCandidates.indices.compactMap {
+            collectionView.layoutAttributesForItem(at: IndexPath(item: $0, section: 0))
+        }
+        guard let firstRowMinY = attributes.map(\.frame.minY).min(),
+              let secondRowMinY = attributes
+                .map(\.frame.minY)
+                .filter({ $0 > firstRowMinY + 1 })
+                .min() else {
+            return
+        }
+
+        let sectionTopInset = (collectionView.collectionViewLayout as? UICollectionViewFlowLayout)?.sectionInset.top ?? 0
+        let targetOffsetY = max(0, secondRowMinY - sectionTopInset)
+        let maximumOffsetY = max(0, collectionView.contentSize.height - collectionView.bounds.height)
+        let offsetY = min(targetOffsetY, maximumOffsetY)
+
+        guard offsetY > 0 else {
+            return
+        }
+
+        collectionView.setContentOffset(CGPoint(x: 0, y: offsetY), animated: false)
     }
 
     func collectionView(
