@@ -139,7 +139,7 @@ public struct KanaKanjiConverter: Sendable {
             return []
         }
 
-        var graph = constructGraph(input, unknownWordCost: options.unknownWordCost)
+        var graph = constructGraph(input, options: options)
         return backwardAStar(
             graph: &graph,
             length: Array(input).count,
@@ -148,9 +148,115 @@ public struct KanaKanjiConverter: Sendable {
         )
     }
 
+    public func predict(
+        _ input: String,
+        options: ConversionOptions = ConversionOptions(),
+        limit: Int = 50
+    ) -> [ConversionCandidate] {
+        let inputLength = input.count
+        guard inputLength >= 3,
+              options.yomiSearchMode.includesPredictive,
+              limit > 0 else {
+            return []
+        }
+
+        let entries = dictionary.predictiveEntries(
+            for: input,
+            predictivePrefixLength: max(1, options.predictivePrefixLength),
+            limit: limit,
+            maxYomiLength: predictiveMaxYomiLength(forInputLength: inputLength)
+        )
+
+        var bestByText: [String: ConversionCandidate] = [:]
+        bestByText.reserveCapacity(entries.count)
+
+        for entry in entries {
+            let extraLength = max(0, entry.yomi.count - input.count)
+            let score = entry.cost + extraLength * 200
+            let candidate = ConversionCandidate(
+                text: entry.surface,
+                reading: entry.yomi,
+                score: score
+            )
+
+            if let current = bestByText[entry.surface] {
+                if candidate.score < current.score {
+                    bestByText[entry.surface] = candidate
+                }
+            } else {
+                bestByText[entry.surface] = candidate
+            }
+        }
+
+        return bestByText.values.sorted {
+            if $0.reading.count != $1.reading.count {
+                return $0.reading.count > $1.reading.count
+            }
+            if $0.score != $1.score {
+                return $0.score < $1.score
+            }
+            return $0.text < $1.text
+        }
+    }
+
+    public func commonPrefixCandidates(
+        _ input: String,
+        options: ConversionOptions = ConversionOptions(),
+        limit: Int = 50
+    ) -> [ConversionCandidate] {
+        guard input.count > 1, limit > 0 else {
+            return []
+        }
+
+        let characters = Array(input)
+        let matches = dictionary.prefixMatches(
+            in: characters,
+            from: 0,
+            mode: graphSearchMode(for: options.yomiSearchMode),
+            predictivePrefixLength: max(1, options.predictivePrefixLength)
+        )
+
+        var bestByText: [String: ConversionCandidate] = [:]
+        bestByText.reserveCapacity(limit)
+
+        for match in matches where match.length < characters.count {
+            let penaltyCost = match.penalty * options.omissionPenaltyWeight
+            for entry in match.entries {
+                let candidate = ConversionCandidate(
+                    text: entry.surface,
+                    reading: entry.yomi,
+                    score: entry.cost + penaltyCost,
+                    consumedLength: match.length
+                )
+
+                if let current = bestByText[entry.surface] {
+                    if candidate.score < current.score {
+                        bestByText[entry.surface] = candidate
+                    }
+                } else {
+                    bestByText[entry.surface] = candidate
+                }
+            }
+        }
+
+        return bestByText.values.sorted {
+            if $0.reading.count != $1.reading.count {
+                return $0.reading.count > $1.reading.count
+            }
+            if $0.score != $1.score {
+                return $0.score < $1.score
+            }
+            return $0.text < $1.text
+        }.prefix(limit).map { $0 }
+    }
+
+    private func predictiveMaxYomiLength(forInputLength inputLength: Int) -> Int? {
+        inputLength < 6 ? inputLength + 2 : nil
+    }
+
     private func constructGraph(
         _ input: String,
-        unknownWordCost: Int
+        options: ConversionOptions
     ) -> [[Node]] {
         let characters = Array(input)
         let length = characters.count
@@ -159,11 +265,21 @@ public struct KanaKanjiConverter: Sendable {
         graph[0].append(makeBOS())
         graph[length + 1].append(makeEOS(position: length + 1))
 
+        // C++ 版と同じく、predictivePrefixLength は最低 1 に正規化する。
+        let predictivePrefixLength = max(1, options.predictivePrefixLength)
+
         for position in 0..<length {
-            let matches = dictionary.prefixMatches(in: characters, from: position)
+            let matches = dictionary.prefixMatches(
+                in: characters,
+                from: position,
+                mode: graphSearchMode(for: options.yomiSearchMode),
+                predictivePrefixLength: predictivePrefixLength
+            )
             var foundInDictionary = false
 
             if !matches.isEmpty {
+                // common prefix / predictive / omission のいずれかで辞書ヒットがあれば
+                // unknown fallback を抑止する (従来挙動を保つ)。
                 foundInDictionary = true
                 for match in matches {
                     let endPosition = position + match.length
@@ -171,12 +287,15 @@ public struct KanaKanjiConverter: Sendable {
                         continue
                     }
 
+                    let penaltyCost = match.penalty * options.omissionPenaltyWeight
+
                     for entry in match.entries {
+                        let adjustedCost = entry.cost + penaltyCost
                         let node = Node(
                             leftId: entry.leftId,
                             rightId: entry.rightId,
-                            score: entry.cost,
-                            forwardCost: entry.cost,
+                            score: adjustedCost,
+                            forwardCost: adjustedCost,
                             surface: entry.surface,
                             yomi: entry.yomi,
                             length: match.length,
@@ -192,8 +311,8 @@ public struct KanaKanjiConverter: Sendable {
                 let node = Node(
                     leftId: 0,
                     rightId: 0,
-                    score: unknownWordCost,
-                    forwardCost: unknownWordCost,
+                    score: options.unknownWordCost,
+                    forwardCost: options.unknownWordCost,
                     surface: yomi,
                     yomi: yomi,
                     length: 1,
@@ -204,6 +323,15 @@ public struct KanaKanjiConverter: Sendable {
         }
 
         return graph
+    }
+
+    private func graphSearchMode(for mode: YomiSearchMode) -> YomiSearchMode {
+        switch mode {
+        case .commonPrefix, .commonPrefixPlusPredictive:
+            return .commonPrefix
+        case .commonPrefixPlusOmission, .all:
+            return .commonPrefixPlusOmission
+        }
     }
 
     private func forwardDP(graph: inout [[Node]], length: Int, beamWidth: Int) {
