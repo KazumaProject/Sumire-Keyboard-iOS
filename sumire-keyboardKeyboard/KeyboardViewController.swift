@@ -1,6 +1,6 @@
 import UIKit
 
-final class KeyboardViewController: UIInputViewController {
+final class KeyboardViewController: UIInputViewController, UICollectionViewDataSource, UICollectionViewDelegate {
     private enum KeyboardTheme {
         static let keyboardBackground = UIColor { traits in
             traits.userInterfaceStyle == .dark
@@ -99,6 +99,12 @@ final class KeyboardViewController: UIInputViewController {
     private enum MainKeyboardPanel: Equatable {
         case text
         case emoji
+    }
+
+    // mainKeyboardPanel は通常パネルの種類、こちらは mainKeyboardContainer の表示内容を分けて管理するために使う。
+    private enum MainKeyboardContentMode: Equatable {
+        case keyboard
+        case candidateList
     }
 
     private enum QWERTYMode: Equatable {
@@ -451,6 +457,136 @@ final class KeyboardViewController: UIInputViewController {
             layer.borderColor = isSelected
                 ? UIColor.systemBlue.resolvedColor(with: traitCollection).cgColor
                 : UIColor.clear.cgColor
+        }
+    }
+
+    private final class CandidateListCell: UICollectionViewCell {
+        static let reuseIdentifier = "CandidateListCell"
+
+        private let titleLabel = UILabel()
+        private let dividerLabel = UILabel()
+        private let contentStack = UIStackView()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            contentView.backgroundColor = .clear
+            contentView.layer.cornerRadius = 8
+            contentView.layer.masksToBounds = true
+
+            titleLabel.font = .systemFont(ofSize: 15, weight: .medium)
+            titleLabel.textColor = .label
+            titleLabel.numberOfLines = 1
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+            titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+            dividerLabel.text = "｜"
+            dividerLabel.font = .systemFont(ofSize: 14, weight: .regular)
+            dividerLabel.textColor = .separator
+            dividerLabel.textAlignment = .center
+            dividerLabel.setContentHuggingPriority(.required, for: .horizontal)
+            dividerLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+            contentStack.axis = .horizontal
+            contentStack.alignment = .center
+            contentStack.distribution = .fill
+            contentStack.spacing = 5
+            contentStack.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(contentStack)
+            contentStack.addArrangedSubview(titleLabel)
+            contentStack.addArrangedSubview(dividerLabel)
+
+            NSLayoutConstraint.activate([
+                contentStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+                contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+                contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4),
+                contentStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+                titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+                contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 30)
+            ])
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        override func prepareForReuse() {
+            super.prepareForReuse()
+            titleLabel.text = nil
+            dividerLabel.isHidden = false
+            isSelected = false
+        }
+
+        override func preferredLayoutAttributesFitting(
+            _ layoutAttributes: UICollectionViewLayoutAttributes
+        ) -> UICollectionViewLayoutAttributes {
+            setNeedsLayout()
+            layoutIfNeeded()
+
+            let fittingSize = contentView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let attributes = layoutAttributes.copy() as? UICollectionViewLayoutAttributes ?? layoutAttributes
+            attributes.frame.size = CGSize(
+                width: ceil(fittingSize.width),
+                height: max(30, ceil(fittingSize.height))
+            )
+            return attributes
+        }
+
+        override var isSelected: Bool {
+            didSet {
+                updateSelectionAppearance()
+            }
+        }
+
+        func configure(title: String, showsDivider: Bool, isSelected: Bool) {
+            titleLabel.text = title
+            dividerLabel.isHidden = showsDivider == false
+            self.isSelected = isSelected
+            updateSelectionAppearance()
+        }
+
+        private func updateSelectionAppearance() {
+            contentView.backgroundColor = isSelected ? .systemBlue : .clear
+            titleLabel.textColor = isSelected ? .white : .label
+            dividerLabel.textColor = isSelected ? UIColor.white.withAlphaComponent(0.7) : .separator
+        }
+    }
+
+    private final class LeftAlignedCollectionViewFlowLayout: UICollectionViewFlowLayout {
+        override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+            guard let originalAttributes = super.layoutAttributesForElements(in: rect) else {
+                return nil
+            }
+
+            let attributes = originalAttributes.compactMap {
+                $0.copy() as? UICollectionViewLayoutAttributes
+            }
+            let cellAttributes = attributes
+                .filter { $0.representedElementCategory == .cell }
+                .sorted {
+                    if abs($0.frame.minY - $1.frame.minY) > 1 {
+                        return $0.frame.minY < $1.frame.minY
+                    }
+                    return $0.frame.minX < $1.frame.minX
+                }
+
+            var leftInset = sectionInset.left
+            var currentRowMinY: CGFloat?
+            for attribute in cellAttributes {
+                if let rowMinY = currentRowMinY,
+                   abs(attribute.frame.minY - rowMinY) <= 1 {
+                    attribute.frame.origin.x = leftInset
+                    leftInset = attribute.frame.maxX + minimumInteritemSpacing
+                } else {
+                    currentRowMinY = attribute.frame.minY
+                    leftInset = sectionInset.left
+                    attribute.frame.origin.x = leftInset
+                    leftInset = attribute.frame.maxX + minimumInteritemSpacing
+                }
+            }
+
+            return attributes
         }
     }
 
@@ -1016,6 +1152,7 @@ final class KeyboardViewController: UIInputViewController {
     private var lastInsertedText = ""
     private var lastInputDate: Date?
     private var mainKeyboardPanel: MainKeyboardPanel = .text
+    private var mainKeyboardContentMode: MainKeyboardContentMode = .keyboard
     private var sumireKeyboards = KeyboardSettings.keyboards
     private var currentSumireKeyboard = KeyboardSettings.currentKeyboard
     private var qwertyMode: QWERTYMode = .normal
@@ -1040,13 +1177,19 @@ final class KeyboardViewController: UIInputViewController {
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
     private var candidateButtons: [CandidateButton] = []
+    private var candidateListCandidates: [String] = []
+    private var candidateListSelectedCandidateIndex: Int?
     private let preeditReadingView = PreeditReadingView()
+    private let candidateRowContainer = UIStackView()
     private let candidateScrollView = UIScrollView()
     private let candidateStack = UIStackView()
+    private let candidateToggleContainer = UIView()
+    private let candidateListToggleButton = UIButton(type: .system)
     private let emptyPreeditToolbar = UIStackView()
     private let contentStack = UIStackView()
     private let keyboardStack = UIStackView()
     private let mainKeyboardContainer = UIView()
+    private weak var candidateListCollectionView: UICollectionView?
     private let flickGuideView = FlickGuideView()
     private lazy var keyboardVisualModeController = KeyboardVisualModeController(contentRootView: keyboardStack)
     private lazy var cursorMoveController = CursorMoveController(
@@ -1245,10 +1388,22 @@ final class KeyboardViewController: UIInputViewController {
         candidateBar.spacing = 0
         candidateBar.translatesAutoresizingMaskIntoConstraints = false
 
+        candidateRowContainer.axis = .horizontal
+        candidateRowContainer.alignment = .fill
+        candidateRowContainer.distribution = .fill
+        candidateRowContainer.spacing = 0
+        candidateRowContainer.translatesAutoresizingMaskIntoConstraints = false
+
         candidateScrollView.showsHorizontalScrollIndicator = true
         candidateScrollView.alwaysBounceHorizontal = true
         candidateScrollView.backgroundColor = .clear
         candidateScrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        candidateToggleContainer.backgroundColor = .clear
+        candidateToggleContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let toggleButton = makeCandidateListToggleButton()
+        candidateToggleContainer.addSubview(toggleButton)
 
         candidateStack.axis = .horizontal
         candidateStack.alignment = .fill
@@ -1258,19 +1413,51 @@ final class KeyboardViewController: UIInputViewController {
         candidateScrollView.addSubview(candidateStack)
         configureEmptyPreeditToolbar()
 
+        candidateRowContainer.addArrangedSubview(candidateScrollView)
+        candidateRowContainer.addArrangedSubview(candidateToggleContainer)
+
         NSLayoutConstraint.activate([
             candidateStack.topAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.topAnchor),
             candidateStack.leadingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.leadingAnchor),
             candidateStack.trailingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.trailingAnchor),
             candidateStack.bottomAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.bottomAnchor),
-            candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor)
+            candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor),
+
+            // Toggle 領域を Auto Layout 上で分離し、候補が右端ボタンの下へ潜り込まないようにする。
+            candidateToggleContainer.widthAnchor.constraint(equalToConstant: 42),
+            toggleButton.centerXAnchor.constraint(equalTo: candidateToggleContainer.centerXAnchor),
+            toggleButton.centerYAnchor.constraint(equalTo: candidateToggleContainer.centerYAnchor),
+            toggleButton.widthAnchor.constraint(equalToConstant: 38),
+            toggleButton.topAnchor.constraint(greaterThanOrEqualTo: candidateToggleContainer.topAnchor),
+            toggleButton.bottomAnchor.constraint(lessThanOrEqualTo: candidateToggleContainer.bottomAnchor)
         ])
 
         candidateBar.addArrangedSubview(preeditReadingView)
-        candidateBar.addArrangedSubview(candidateScrollView)
+        candidateBar.addArrangedSubview(candidateRowContainer)
         candidateBar.addArrangedSubview(emptyPreeditToolbar)
         emptyPreeditToolbar.isHidden = true
+        updateCandidateListToggleAppearance()
         return candidateBar
+    }
+
+    private func makeCandidateListToggleButton() -> UIButton {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "chevron.down")
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 16,
+            weight: .semibold
+        )
+        configuration.baseBackgroundColor = .clear
+        configuration.baseForegroundColor = .label
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4)
+
+        candidateListToggleButton.configuration = configuration
+        candidateListToggleButton.backgroundColor = .clear
+        candidateListToggleButton.tintColor = .label
+        candidateListToggleButton.accessibilityLabel = "候補一覧を表示"
+        candidateListToggleButton.addTarget(self, action: #selector(handleCandidateListToggle), for: .touchUpInside)
+        candidateListToggleButton.translatesAutoresizingMaskIntoConstraints = false
+        return candidateListToggleButton
     }
 
     private func configureEmptyPreeditToolbar() {
@@ -1780,9 +1967,13 @@ final class KeyboardViewController: UIInputViewController {
         )
     }
 
-    private func rebuildKeyboardLayout() {
+    private func rebuildKeyboardLayout(resetCandidateListMode: Bool = true) {
         cursorMoveController.cancelTracking()
         keyboardVisualModeController.setMode(.normal)
+        if resetCandidateListMode {
+            mainKeyboardContentMode = .keyboard
+            updateCandidateListToggleAppearance()
+        }
         NSLayoutConstraint.deactivate(keyboardLayoutConstraints)
         keyboardLayoutConstraints.removeAll()
 
@@ -1800,7 +1991,10 @@ final class KeyboardViewController: UIInputViewController {
         suppressedReleaseButtonIDs.removeAll()
         qwertyButtons.removeAll()
 
-        if currentSumireKeyboard.kind == .qwerty {
+        if mainKeyboardContentMode == .candidateList {
+            rebuildMainKeyboardPanel()
+            keyboardStack.addArrangedSubview(mainKeyboardContainer)
+        } else if currentSumireKeyboard.kind == .qwerty {
             let qwertyPanel = mainKeyboardPanel == .emoji ? makeEmojiPlaceholderView() : makeQWERTYKeyboard()
             keyboardStack.addArrangedSubview(qwertyPanel)
         } else {
@@ -1828,11 +2022,15 @@ final class KeyboardViewController: UIInputViewController {
         mainKeyboardContainer.subviews.forEach { $0.removeFromSuperview() }
 
         let panel: UIView
-        switch mainKeyboardPanel {
-        case .text:
-            panel = makeKeyGrid()
-        case .emoji:
-            panel = makeEmojiPlaceholderView()
+        if mainKeyboardContentMode == .candidateList {
+            panel = makeCandidateListView()
+        } else {
+            switch mainKeyboardPanel {
+            case .text:
+                panel = makeKeyGrid()
+            case .emoji:
+                panel = makeEmojiPlaceholderView()
+            }
         }
 
         panel.translatesAutoresizingMaskIntoConstraints = false
@@ -1843,6 +2041,132 @@ final class KeyboardViewController: UIInputViewController {
             panel.trailingAnchor.constraint(equalTo: mainKeyboardContainer.trailingAnchor),
             panel.bottomAnchor.constraint(equalTo: mainKeyboardContainer.bottomAnchor)
         ])
+    }
+
+    private func makeCandidateListView() -> UIView {
+        refreshCandidateListSnapshot()
+
+        let layout = LeftAlignedCollectionViewFlowLayout()
+        layout.scrollDirection = .vertical
+        layout.estimatedItemSize = UICollectionViewFlowLayout.automaticSize
+        layout.minimumInteritemSpacing = 0
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = UIEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+
+        let collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        collectionView.backgroundColor = .clear
+        collectionView.alwaysBounceVertical = true
+        collectionView.showsVerticalScrollIndicator = true
+        collectionView.dataSource = self
+        collectionView.delegate = self
+        collectionView.register(
+            CandidateListCell.self,
+            forCellWithReuseIdentifier: CandidateListCell.reuseIdentifier
+        )
+
+        // 候補がない場合も一覧モードのままにし、下段全体に明示的な空状態を表示する。
+        collectionView.backgroundView = candidateListCandidates.isEmpty ? makeCandidateListPlaceholderView() : nil
+        candidateListCollectionView = collectionView
+        return collectionView
+    }
+
+    private func makeCandidateListPlaceholderView() -> UIView {
+        let placeholder = UILabel()
+        placeholder.text = "候補がありません"
+        placeholder.textColor = .secondaryLabel
+        placeholder.font = .systemFont(ofSize: 15, weight: .medium)
+        placeholder.textAlignment = .center
+        return placeholder
+    }
+
+    private func refreshCandidateListSnapshot() {
+        candidateListCandidates = currentCandidateTexts()
+        candidateListSelectedCandidateIndex = currentSelectedCandidateIndex(
+            candidateCount: candidateListCandidates.count
+        )
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        numberOfItemsInSection section: Int
+    ) -> Int {
+        candidateListCandidates.count
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        cellForItemAt indexPath: IndexPath
+    ) -> UICollectionViewCell {
+        guard let cell = collectionView.dequeueReusableCell(
+            withReuseIdentifier: CandidateListCell.reuseIdentifier,
+            for: indexPath
+        ) as? CandidateListCell else {
+            return UICollectionViewCell()
+        }
+
+        let isLastItem = indexPath.item == candidateListCandidates.count - 1
+        cell.configure(
+            title: candidateListCandidates[indexPath.item],
+            showsDivider: isLastItem == false,
+            isSelected: indexPath.item == candidateListSelectedCandidateIndex
+        )
+        return cell
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        guard candidateListCandidates.indices.contains(indexPath.item) else {
+            return
+        }
+
+        commitCandidateText(candidateListCandidates[indexPath.item])
+    }
+
+    @objc private func handleCandidateListToggle() {
+        resetMultiTapState()
+        hideFlickGuide()
+
+        guard currentSumireKeyboard.kind != .qwerty else {
+            resetMainKeyboardContentModeToKeyboard()
+            return
+        }
+
+        mainKeyboardContentMode = mainKeyboardContentMode == .candidateList ? .keyboard : .candidateList
+        rebuildKeyboardLayout(resetCandidateListMode: false)
+        updateCandidateListToggleAppearance()
+    }
+
+    private func updateCandidateListToggleAppearance() {
+        let showsCandidateList = mainKeyboardContentMode == .candidateList
+        let imageName = showsCandidateList ? "chevron.up" : "chevron.down"
+
+        var configuration = candidateListToggleButton.configuration ?? UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: imageName)
+        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
+            pointSize: 16,
+            weight: .semibold
+        )
+        configuration.baseBackgroundColor = .clear
+        configuration.baseForegroundColor = .label
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4)
+        candidateListToggleButton.configuration = configuration
+
+        let canToggle = currentSumireKeyboard.kind != .qwerty
+        candidateListToggleButton.isEnabled = canToggle
+        candidateListToggleButton.alpha = canToggle ? 1 : 0.35
+        candidateListToggleButton.accessibilityLabel = showsCandidateList ? "通常のキーボードを表示" : "候補一覧を表示"
+    }
+
+    private func resetMainKeyboardContentModeToKeyboard(rebuildsPanel: Bool = true) {
+        guard mainKeyboardContentMode != .keyboard else {
+            updateCandidateListToggleAppearance()
+            return
+        }
+
+        mainKeyboardContentMode = .keyboard
+        if rebuildsPanel {
+            rebuildKeyboardLayout(resetCandidateListMode: false)
+        }
+        updateCandidateListToggleAppearance()
     }
 
     private func makeKeyGrid() -> UIStackView {
@@ -2872,6 +3196,10 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
 
+        commitCandidateText(text)
+    }
+
+    private func commitCandidateText(_ text: String) {
         resetMultiTapState()
         commitComposingText(text)
     }
@@ -3330,6 +3658,18 @@ final class KeyboardViewController: UIInputViewController {
         updateSpaceButtonTitle()
         updatePreeditReadingPreview()
 
+        if mainKeyboardContentMode == .candidateList,
+           ((mainKeyboardPanel != .emoji && composingText.isEmpty) || currentSumireKeyboard.kind == .qwerty || isDirectMode) {
+            resetMainKeyboardContentModeToKeyboard()
+        }
+
+        defer {
+            updateCandidateListToggleAppearance()
+            if mainKeyboardContentMode == .candidateList {
+                rebuildMainKeyboardPanel()
+            }
+        }
+
         let candidates = currentCandidateTexts()
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
         let showsEmptyToolbar = shouldShowEmptyPreeditToolbar
@@ -3382,6 +3722,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func updateCandidateBarMode(showsEmptyPreeditToolbar: Bool) {
         emptyPreeditToolbar.isHidden = showsEmptyPreeditToolbar == false
+        candidateRowContainer.isHidden = showsEmptyPreeditToolbar
         candidateScrollView.isHidden = showsEmptyPreeditToolbar
         if showsEmptyPreeditToolbar {
             preeditReadingView.clear()
@@ -3912,6 +4253,8 @@ final class KeyboardViewController: UIInputViewController {
 
     private func handleEmojiKeyboardKey() {
         commitRenderedComposingTextAsTyped()
+        // 絵文字パネルでは候補一覧を優先表示しないため、切替前に表示モードを戻す。
+        resetMainKeyboardContentModeToKeyboard(rebuildsPanel: false)
         mainKeyboardPanel = mainKeyboardPanel == .emoji ? .text : .emoji
         if currentSumireKeyboard.kind == .qwerty {
             rebuildKeyboardLayout()
@@ -4306,6 +4649,8 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         qwertyRawInput = ""
+        // 候補確定後は通常キーボードへ戻し、一覧モードの状態を残さない。
+        resetMainKeyboardContentModeToKeyboard()
 
         let activeRange = normalizedConversionRange()
         guard activeRange.isEmpty == false else {
@@ -4341,10 +4686,12 @@ final class KeyboardViewController: UIInputViewController {
     private func commitRenderedComposingTextAsTyped() {
         guard composingText.isEmpty == false else {
             qwertyRawInput = ""
+            resetMainKeyboardContentModeToKeyboard()
             return
         }
 
         qwertyRawInput = ""
+        resetMainKeyboardContentModeToKeyboard()
         composingText = ""
         renderedComposingText = ""
         composingCursorPosition = 0
