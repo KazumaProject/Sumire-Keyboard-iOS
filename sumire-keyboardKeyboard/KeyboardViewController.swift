@@ -5148,7 +5148,9 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         var candidates: [ConversionCandidateItem] = []
 
         func appendUnique(_ text: String, consumedReadingLength: Int = targetText.count) {
-            guard text.isEmpty == false, seen.insert(text).inserted else {
+            guard text.isEmpty == false,
+                  isDisplayableConversionCandidate(text),
+                  seen.insert(text).inserted else {
                 return
             }
             let consumedLength = min(max(consumedReadingLength, 0), targetText.count)
@@ -5195,6 +5197,17 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         appendUnique(halfWidthKatakanaText(from: targetText))
 
         return candidates
+    }
+
+    private func isDisplayableConversionCandidate(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x1B000...0x1B16F:
+                return false
+            default:
+                return true
+            }
+        }
     }
 
     private func conversionTargetText() -> String {
