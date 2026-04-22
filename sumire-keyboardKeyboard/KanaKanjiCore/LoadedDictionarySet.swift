@@ -5,6 +5,7 @@ public enum SupplementalDictionaryKind: String, CaseIterable, Sendable {
     case emoticon
     case readingCorrection = "reading_correction"
     case symbol
+    case singleKanji = "single_kanji"
 
     public var resourceDirectoryName: String {
         rawValue

@@ -46,6 +46,15 @@ struct KanaKanjiBundleResources {
         return directories
     }
 
+    func englishArtifactsDirectory() -> URL? {
+        guard let resourcesDirectory = resourcesDirectory() else {
+            return nil
+        }
+
+        let directory = resourcesDirectory.appendingPathComponent("english", isDirectory: true)
+        return EnglishArtifactIO.containsArtifacts(at: directory) ? directory : nil
+    }
+
     func connectionMatrixURL(forMainArtifactsDirectory mainArtifactsDirectory: URL) -> URL? {
         let localURL = mainArtifactsDirectory.appendingPathComponent(MozcDictionary.connectionMatrixFileName)
         if fileManager.fileExists(atPath: localURL.path) {

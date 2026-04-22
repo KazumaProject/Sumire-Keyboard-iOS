@@ -1188,8 +1188,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var conversionRange: Range<Int> = 0..<0
     private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
+    private var englishEngine: EnglishEngine?
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
+    private var isLoadingEnglishDictionary = false
     private var candidateButtons: [CandidateButton] = []
     private var candidateListCandidates: [ConversionCandidateItem] = []
     private var candidateListSelectedCandidateIndex: Int?
@@ -1271,6 +1273,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var resizePanStartState: ResizePanStartState?
     private weak var resizeOverlayView: UIView?
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
+    private static var cachedEnglishEngine: EnglishEngine?
 
     override func loadView() {
         let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
@@ -1332,8 +1335,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         scheduledKanaKanjiLoad = nil
         kanaKanjiLoadGeneration += 1
         isLoadingKanaKanjiConverter = false
+        isLoadingEnglishDictionary = false
         kanaKanjiConverter = nil
+        englishEngine = nil
         Self.cachedKanaKanjiConverter = nil
+        Self.cachedEnglishEngine = nil
         converterLoadFailureMessage = nil
         renderCurrentComposingText()
         updatePreedit()
@@ -5157,7 +5163,18 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             candidates.append(ConversionCandidateItem(text: text, consumedReadingLength: consumedLength))
         }
 
-        guard currentPrecompositionStatus?.language == .japanese else {
+        switch currentPrecompositionStatus?.language {
+        case .japanese:
+            break
+        case .english:
+            if let englishEngine {
+                for candidate in englishEngine.getPrediction(input: targetText).prefix(conversionCandidateLimit) {
+                    appendUnique(candidate.word)
+                }
+            }
+            appendUnique(targetText)
+            return candidates
+        default:
             appendUnique(targetText)
             return candidates
         }
@@ -5353,6 +5370,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
         if let cachedConverter = Self.cachedKanaKanjiConverter {
             kanaKanjiConverter = cachedConverter
+            loadEnglishDictionaryIfNeeded()
             converterLoadFailureMessage = nil
             renderCurrentComposingText()
             updatePreedit()
@@ -5360,6 +5378,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         let resources = KanaKanjiBundleResources()
+        loadEnglishDictionaryIfNeeded(resources: resources)
         guard let mainArtifactsDirectory = resources.mainArtifactsDirectory() else {
             converterLoadFailureMessage = "KanaKanji resources were not found in the keyboard bundle."
             return
@@ -5450,6 +5469,50 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                     self.converterLoadFailureMessage = error.localizedDescription
                 }
                 self.renderCurrentComposingText()
+                self.updatePreedit()
+            }
+        }
+    }
+
+    private func loadEnglishDictionaryIfNeeded(resources: KanaKanjiBundleResources = KanaKanjiBundleResources()) {
+        guard englishEngine == nil, isLoadingEnglishDictionary == false else {
+            return
+        }
+
+        if let cachedEngine = Self.cachedEnglishEngine {
+            englishEngine = cachedEngine
+            return
+        }
+
+        guard let englishArtifactsDirectory = resources.englishArtifactsDirectory() else {
+            return
+        }
+
+        isLoadingEnglishDictionary = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result: Result<EnglishEngine, Error>
+            do {
+                let dictionary = try EnglishDictionary(artifactsDirectory: englishArtifactsDirectory)
+                result = .success(EnglishEngine(dictionary: dictionary))
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+
+                self.isLoadingEnglishDictionary = false
+                switch result {
+                case .success(let engine):
+                    self.englishEngine = engine
+                    Self.cachedEnglishEngine = engine
+                    NSLog("English dictionary loaded. artifacts=%@", englishArtifactsDirectory.path)
+                case .failure(let error):
+                    self.englishEngine = nil
+                    NSLog("English dictionary failed to load. artifacts=%@ error=%@", englishArtifactsDirectory.path, error.localizedDescription)
+                }
                 self.updatePreedit()
             }
         }
