@@ -1161,6 +1161,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var lastQWERTYShiftTapDate: Date?
     private var qwertyRawInput = ""
     private var preeditReadingPreviewEnabled = KeyboardSettings.preeditReadingPreviewEnabled
+    private var omissionSearchEnabled = KeyboardSettings.omissionSearchEnabled
     private var inputStatus: InputStatus = .precomposition(PrecompositionStatus(
         language: .japanese,
         phase: .empty,
@@ -4459,6 +4460,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             shouldUpdatePreedit = true
         }
 
+        let nextOmissionSearchEnabled = KeyboardSettings.omissionSearchEnabled
+        if omissionSearchEnabled != nextOmissionSearchEnabled {
+            omissionSearchEnabled = nextOmissionSearchEnabled
+            shouldRenderComposition = true
+            shouldUpdatePreedit = true
+        }
+
         if shouldApplyKeyboard {
             applyCurrentSumireKeyboard()
             return
@@ -4963,8 +4971,21 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         if let kanaKanjiConverter {
-            let options = ConversionOptions(limit: conversionCandidateLimit, beamWidth: conversionBeamWidth)
+            let options = ConversionOptions(
+                limit: conversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: omissionSearchEnabled ? .all : .commonPrefixPlusPredictive,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
             for candidate in kanaKanjiConverter.convert(targetText, options: options) {
+                appendUnique(candidate.text)
+            }
+            for candidate in kanaKanjiConverter.predict(
+                targetText,
+                options: options,
+                limit: conversionCandidateLimit
+            ) {
                 appendUnique(candidate.text)
             }
         }

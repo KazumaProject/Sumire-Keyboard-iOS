@@ -27,6 +27,12 @@ struct ContentView: View {
     private var preeditReadingPreviewEnabled = false
 
     @AppStorage(
+        KeyboardSettings.Keys.omissionSearchEnabled,
+        store: KeyboardSettings.defaults
+    )
+    private var omissionSearchEnabled = false
+
+    @AppStorage(
         KeyboardSettings.Keys.usesHalfWidthSpace,
         store: KeyboardSettings.defaults
     )
@@ -138,6 +144,12 @@ struct ContentView: View {
             Toggle("Live Conversion", isOn: $liveConversionEnabled)
 
             Toggle("PreEdit の読みを候補上部に表示", isOn: $preeditReadingPreviewEnabled)
+
+            Toggle("OmissionSearch を有効にする", isOn: $omissionSearchEnabled)
+
+            Text("濁点・半濁点・小書き文字などの省略入力も候補に含めます。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             Toggle("Space キーで半角スペースを入力", isOn: $usesHalfWidthSpace)
 
