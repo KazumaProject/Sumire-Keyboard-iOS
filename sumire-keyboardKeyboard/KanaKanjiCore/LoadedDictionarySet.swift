@@ -27,12 +27,14 @@ public struct SupplementalDictionaryStore: Sendable {
         dictionariesByKind.isEmpty
     }
 
-    func dictionary(for kind: SupplementalDictionaryKind) -> MozcDictionary? {
+    public func dictionary(for kind: SupplementalDictionaryKind) -> MozcDictionary? {
         dictionariesByKind[kind]
     }
 
-    func orderedDictionaries() -> [MozcDictionary] {
-        SupplementalDictionaryKind.allCases.compactMap { dictionariesByKind[$0] }
+    func orderedDictionaries(excluding excludedKinds: Set<SupplementalDictionaryKind> = []) -> [MozcDictionary] {
+        SupplementalDictionaryKind.allCases.compactMap {
+            excludedKinds.contains($0) ? nil : dictionariesByKind[$0]
+        }
     }
 }
 
@@ -58,6 +60,14 @@ public struct CompositeMozcDictionary: Sendable {
 
     public init(dictionarySet: LoadedDictionarySet) {
         self.init(main: dictionarySet.main, supplementals: dictionarySet.supplementals)
+    }
+
+    init(dictionaries: [MozcDictionary]) {
+        self.dictionaries = dictionaries
+    }
+
+    var isEmpty: Bool {
+        dictionaries.isEmpty
     }
 
     func prefixMatches(

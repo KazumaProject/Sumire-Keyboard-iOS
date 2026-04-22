@@ -62,9 +62,22 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let candidates: [String]
     }
 
-    private struct ConversionCandidateItem: Equatable {
+    private struct ConversionCandidateItem: Equatable, Sendable {
         let text: String
         let consumedReadingLength: Int
+    }
+
+    private struct ScoredConversionCandidateItem: Sendable {
+        let item: ConversionCandidateItem
+        let score: Int
+    }
+
+    private struct ConversionCandidateLookupKey: Equatable, Sendable {
+        let targetText: String
+        let language: PrecompositionLanguage
+        let omissionSearchEnabled: Bool
+        let hasKanaKanjiConverter: Bool
+        let hasEnglishEngine: Bool
     }
 
     private enum KeyAction {
@@ -95,7 +108,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case precomposition(PrecompositionStatus)
     }
 
-    private enum PrecompositionLanguage: String, Equatable {
+    private enum PrecompositionLanguage: String, Equatable, Sendable {
         case japanese
         case english
         case number
@@ -1192,6 +1205,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
     private var isLoadingEnglishDictionary = false
+    private var conversionCandidateLookupGeneration = 0
+    private var conversionCandidateLookupKey: ConversionCandidateLookupKey?
+    private var conversionCandidateLookupInFlightKey: ConversionCandidateLookupKey?
+    private var conversionCandidateLookupResults: [ConversionCandidateItem] = []
     private var candidateButtons: [CandidateButton] = []
     private var candidateListCandidates: [ConversionCandidateItem] = []
     private var candidateListSelectedCandidateIndex: Int?
@@ -1228,6 +1245,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     )
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 10
+    private let auxiliaryConversionCandidateLimit = 100
+    private let singleKanjiConversionCandidateLimit = 200
     private let conversionBeamWidth = 20
     private let keyboardHorizontalInset = CGFloat(KeyboardSettings.defaultKeyboardLeadingOffset)
     private let keyboardBaseHeight = CGFloat(KeyboardSettings.defaultKeyboardHeight)
@@ -1321,6 +1340,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.viewWillDisappear(animated)
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionCandidateLookupGeneration += 1
+        conversionCandidateLookupInFlightKey = nil
         stopDeleteRepeat()
         stopCursorRepeat()
         cursorMoveController.cancelTracking()
@@ -1333,6 +1354,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.didReceiveMemoryWarning()
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionCandidateLookupGeneration += 1
+        conversionCandidateLookupKey = nil
+        conversionCandidateLookupInFlightKey = nil
+        conversionCandidateLookupResults.removeAll()
         kanaKanjiLoadGeneration += 1
         isLoadingKanaKanjiConverter = false
         isLoadingEnglishDictionary = false
@@ -5146,10 +5171,106 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         let targetText = conversionTargetText()
-        guard targetText.isEmpty == false else {
+        guard targetText.isEmpty == false,
+              let language = currentPrecompositionStatus?.language else {
             return []
         }
 
+        let key = ConversionCandidateLookupKey(
+            targetText: targetText,
+            language: language,
+            omissionSearchEnabled: omissionSearchEnabled,
+            hasKanaKanjiConverter: kanaKanjiConverter != nil,
+            hasEnglishEngine: englishEngine != nil
+        )
+
+        if conversionCandidateLookupKey == key {
+            return conversionCandidateLookupResults
+        }
+
+        scheduleConversionCandidateLookup(for: key)
+        return Self.immediateCandidateItems(for: targetText, language: language)
+    }
+
+    private func scheduleConversionCandidateLookup(for key: ConversionCandidateLookupKey) {
+        guard conversionCandidateLookupInFlightKey != key else {
+            return
+        }
+
+        conversionCandidateLookupGeneration += 1
+        let lookupGeneration = conversionCandidateLookupGeneration
+        conversionCandidateLookupKey = nil
+        conversionCandidateLookupResults.removeAll()
+        conversionCandidateLookupInFlightKey = key
+
+        let kanaKanjiConverter = kanaKanjiConverter
+        let englishEngine = englishEngine
+        let conversionCandidateLimit = conversionCandidateLimit
+        let auxiliaryConversionCandidateLimit = auxiliaryConversionCandidateLimit
+        let singleKanjiConversionCandidateLimit = singleKanjiConversionCandidateLimit
+        let conversionBeamWidth = conversionBeamWidth
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let candidates = Self.buildCandidateItems(
+                targetText: key.targetText,
+                language: key.language,
+                kanaKanjiConverter: kanaKanjiConverter,
+                englishEngine: englishEngine,
+                conversionCandidateLimit: conversionCandidateLimit,
+                auxiliaryConversionCandidateLimit: auxiliaryConversionCandidateLimit,
+                singleKanjiConversionCandidateLimit: singleKanjiConversionCandidateLimit,
+                conversionBeamWidth: conversionBeamWidth,
+                omissionSearchEnabled: key.omissionSearchEnabled
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.conversionCandidateLookupGeneration == lookupGeneration,
+                      self.currentConversionCandidateLookupKey() == key else {
+                    return
+                }
+
+                self.conversionCandidateLookupInFlightKey = nil
+                self.conversionCandidateLookupKey = key
+                self.conversionCandidateLookupResults = candidates
+                self.renderCurrentComposingText()
+                self.updatePreedit()
+            }
+        }
+    }
+
+    private func currentConversionCandidateLookupKey() -> ConversionCandidateLookupKey? {
+        guard isDirectMode == false,
+              composingText.isEmpty == false,
+              let language = currentPrecompositionStatus?.language else {
+            return nil
+        }
+
+        let targetText = conversionTargetText()
+        guard targetText.isEmpty == false else {
+            return nil
+        }
+
+        return ConversionCandidateLookupKey(
+            targetText: targetText,
+            language: language,
+            omissionSearchEnabled: omissionSearchEnabled,
+            hasKanaKanjiConverter: kanaKanjiConverter != nil,
+            hasEnglishEngine: englishEngine != nil
+        )
+    }
+
+    nonisolated private static func buildCandidateItems(
+        targetText: String,
+        language: PrecompositionLanguage,
+        kanaKanjiConverter: KanaKanjiConverter?,
+        englishEngine: EnglishEngine?,
+        conversionCandidateLimit: Int,
+        auxiliaryConversionCandidateLimit: Int,
+        singleKanjiConversionCandidateLimit: Int,
+        conversionBeamWidth: Int,
+        omissionSearchEnabled: Bool
+    ) -> [ConversionCandidateItem] {
         var seen = Set<String>()
         var candidates: [ConversionCandidateItem] = []
 
@@ -5163,7 +5284,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             candidates.append(ConversionCandidateItem(text: text, consumedReadingLength: consumedLength))
         }
 
-        switch currentPrecompositionStatus?.language {
+        switch language {
         case .japanese:
             break
         case .english:
@@ -5174,49 +5295,139 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             }
             appendUnique(targetText)
             return candidates
-        default:
+        case .number:
             appendUnique(targetText)
             return candidates
         }
 
         if let kanaKanjiConverter {
-            let options = ConversionOptions(
+            let mainOptions = ConversionOptions(
                 limit: conversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: omissionSearchEnabled ? .commonPrefixPlusOmission : .commonPrefix,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
+            let fallbackTexts = Set(fallbackScoredCandidates(
+                for: targetText,
+                baseScore: mainOptions.unknownWordCost
+            ).map(\.item.text))
+            for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
+                guard fallbackTexts.contains(candidate.text) == false else {
+                    continue
+                }
+                appendUnique(candidate.text)
+            }
+
+            let auxiliaryOptions = ConversionOptions(
+                limit: auxiliaryConversionCandidateLimit,
                 beamWidth: conversionBeamWidth,
                 yomiSearchMode: omissionSearchEnabled ? .all : .commonPrefixPlusPredictive,
                 predictivePrefixLength: 1,
                 omissionPenaltyWeight: 1500
             )
-            for candidate in kanaKanjiConverter.convert(targetText, options: options) {
-                appendUnique(candidate.text)
-            }
-            for candidate in kanaKanjiConverter.commonPrefixCandidates(
+            var auxiliaryCandidates: [ScoredConversionCandidateItem] = []
+            auxiliaryCandidates.reserveCapacity(auxiliaryConversionCandidateLimit + 3)
+
+            for candidate in kanaKanjiConverter.auxiliaryCandidates(
                 targetText,
-                options: options,
-                limit: conversionCandidateLimit
+                options: auxiliaryOptions,
+                limit: auxiliaryConversionCandidateLimit
             ) {
-                appendUnique(
-                    candidate.text,
-                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count
+                auxiliaryCandidates.append(
+                    ScoredConversionCandidateItem(
+                        item: ConversionCandidateItem(
+                            text: candidate.text,
+                            consumedReadingLength: candidate.consumedLength ?? candidate.reading.count
+                        ),
+                        score: candidate.score
+                    )
                 )
             }
-            for candidate in kanaKanjiConverter.predict(
+
+            auxiliaryCandidates.append(contentsOf: fallbackScoredCandidates(
+                for: targetText,
+                baseScore: auxiliaryOptions.unknownWordCost
+            ))
+
+            for candidate in auxiliaryCandidates.sorted(by: scoredCandidateSort) {
+                appendUnique(candidate.item.text, consumedReadingLength: candidate.item.consumedReadingLength)
+            }
+
+            let singleKanjiOptions = ConversionOptions(
+                limit: singleKanjiConversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: .commonPrefix,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
+            for candidate in kanaKanjiConverter.singleKanjiCandidates(
                 targetText,
-                options: options,
-                limit: conversionCandidateLimit
+                options: singleKanjiOptions,
+                limit: singleKanjiConversionCandidateLimit
             ) {
                 appendUnique(candidate.text)
             }
+        } else {
+            for candidate in fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
+                .sorted(by: scoredCandidateSort) {
+                appendUnique(candidate.item.text, consumedReadingLength: candidate.item.consumedReadingLength)
+            }
         }
-
-        appendUnique(targetText)
-        appendUnique(katakanaText(from: targetText))
-        appendUnique(halfWidthKatakanaText(from: targetText))
 
         return candidates
     }
 
-    private func isDisplayableConversionCandidate(_ text: String) -> Bool {
+    nonisolated private static func immediateCandidateItems(
+        for targetText: String,
+        language: PrecompositionLanguage
+    ) -> [ConversionCandidateItem] {
+        switch language {
+        case .japanese:
+            return uniqueCandidateItems(fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
+                .sorted(by: scoredCandidateSort)
+                .map(\.item))
+        case .english, .number:
+            return [ConversionCandidateItem(text: targetText, consumedReadingLength: targetText.count)]
+        }
+    }
+
+    nonisolated private static func fallbackScoredCandidates(
+        for targetText: String,
+        baseScore: Int
+    ) -> [ScoredConversionCandidateItem] {
+        [
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(text: targetText, consumedReadingLength: targetText.count),
+                score: baseScore
+            ),
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(text: katakanaText(from: targetText), consumedReadingLength: targetText.count),
+                score: baseScore + 100
+            ),
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(text: halfWidthKatakanaText(from: targetText), consumedReadingLength: targetText.count),
+                score: baseScore + 200
+            )
+        ]
+    }
+
+    nonisolated private static func scoredCandidateSort(
+        _ lhs: ScoredConversionCandidateItem,
+        _ rhs: ScoredConversionCandidateItem
+    ) -> Bool {
+        if lhs.score != rhs.score {
+            return lhs.score < rhs.score
+        }
+        return lhs.item.text < rhs.item.text
+    }
+
+    nonisolated private static func uniqueCandidateItems(_ items: [ConversionCandidateItem]) -> [ConversionCandidateItem] {
+        var seen = Set<String>()
+        return items.filter { seen.insert($0.text).inserted }
+    }
+
+    nonisolated private static func isDisplayableConversionCandidate(_ text: String) -> Bool {
         text.unicodeScalars.allSatisfy { scalar in
             switch scalar.value {
             case 0x1B000...0x1B16F:
@@ -5518,11 +5729,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func katakanaText(from text: String) -> String {
+    nonisolated private static func katakanaText(from text: String) -> String {
         text.applyingTransform(.hiraganaToKatakana, reverse: false) ?? text
     }
 
-    private func halfWidthKatakanaText(from text: String) -> String {
+    nonisolated private static func halfWidthKatakanaText(from text: String) -> String {
         let katakana = katakanaText(from: text)
         return katakana.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? katakana
     }

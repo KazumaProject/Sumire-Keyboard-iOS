@@ -51,13 +51,13 @@ enum MozcArtifactIO {
     ) throws -> URL {
         let localURL = directory.appendingPathComponent(posTableFileName)
         let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: localURL.path) {
-            return localURL
-        }
-
         if let sharedPOSTableURL,
            fileManager.fileExists(atPath: sharedPOSTableURL.path) {
             return sharedPOSTableURL
+        }
+
+        if fileManager.fileExists(atPath: localURL.path) {
+            return localURL
         }
 
         throw KanaKanjiError.posTableNotFound(
