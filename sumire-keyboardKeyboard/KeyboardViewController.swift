@@ -1237,6 +1237,9 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private let keyboardMaximumBottomMargin: CGFloat = 80
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
+    private static let hostDeletionDelimiters = Set<Character>([
+        " ", "　", "。", "、", "！", "？", "「", "」", "『", "』", "ー", ".", ","
+    ])
     private var suppressNextButtonRelease = false
     private weak var activeKanaButton: KeyboardButton?
     private weak var activeKanaTouch: UITouch?
@@ -3022,7 +3025,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         button.addTarget(self, action: #selector(handleTouchDrag(_:event:)), for: [.touchDragInside, .touchDragOutside])
         button.addTarget(self, action: #selector(handleKeyRelease(_:event:)), for: [.touchUpInside, .touchUpOutside])
         button.addTarget(self, action: #selector(handleTouchCancel(_:)), for: .touchCancel)
-        button.usesTapOnlyHighlight = keyRequiringFlickTracking(from: button.action) != nil
+        button.usesTapOnlyHighlight = flickGuideKey(from: button.action) != nil
 
         if case .kana = button.action {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
@@ -3030,6 +3033,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
         } else if case .flickOnly = button.action {
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
+            longPress.minimumPressDuration = 0.35
+            longPress.cancelsTouchesInView = false
+            button.addGestureRecognizer(longPress)
+        } else if case .transform = button.action {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleKanaLongPress(_:)))
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
@@ -3063,12 +3071,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             releaseActiveQWERTYButtonIfNeeded(beforeActivating: sender)
             setActiveQWERTYButton(sender)
             activeQWERTYTouch = touch(for: sender, event: event)
+            activeFlickDirection = .center
             hideFlickGuide()
             return
         }
 
         releaseActiveKanaButtonIfNeeded(beforeActivating: sender)
-        guard keyRequiringFlickTracking(from: sender.action) != nil else {
+        guard isFlickTrackableAction(sender.action) else {
             return
         }
 
@@ -3084,24 +3093,36 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         if currentSumireKeyboard.kind == .qwerty {
-            updateActiveQWERTYButton(from: event, fallback: sender)
+            if case .delete = sender.action {
+                activeQWERTYTouch = touch(for: sender, event: event) ?? activeQWERTYTouch
+                activeFlickDirection = flickDirection(for: sender, event: event)
+                setActiveQWERTYButton(sender)
+            } else {
+                updateActiveQWERTYButton(from: event, fallback: sender)
+            }
             return
         }
 
-        guard let key = keyRequiringFlickTracking(from: sender.action) else {
+        guard isFlickTrackableAction(sender.action) else {
             return
         }
 
         activeKanaButton = sender
         activeKanaTouch = touch(for: sender, event: event) ?? activeKanaTouch
         let direction = flickDirection(for: sender, event: event)
+        activeFlickDirection = direction
+
+        guard let key = flickGuideKey(from: sender.action) else {
+            hideFlickGuide()
+            return
+        }
+
         if direction == .center, flickGuideView.showsAllDirections == false {
             activeFlickDirection = .center
             hideFlickGuide()
             return
         }
 
-        activeFlickDirection = direction
         showFlickGuide(
             for: key,
             from: sender,
@@ -3133,7 +3154,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     @objc private func handleKanaLongPress(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began,
               let button = gesture.view as? KeyboardButton,
-              let key = keyRequiringFlickTracking(from: button.action) else {
+              let key = flickGuideKey(from: button.action) else {
             return
         }
 
@@ -3163,7 +3184,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         if currentSumireKeyboard.kind != .qwerty,
-           keyRequiringFlickTracking(from: releasedButton.action) != nil,
+           flickGuideKey(from: releasedButton.action) != nil,
            activeFlickDirection == .center {
             releasedButton.flashTapHighlight()
         }
@@ -3183,7 +3204,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .flickOnly(let key):
             insertFlickOnlyCandidate(for: key, direction: activeFlickDirection)
         case .transform:
-            transformPreviousCharacter()
+            transformPreviousCharacter(direction: activeFlickDirection)
         case .reverseCycle:
             handleReverseCycleKey()
         case .switchMode:
@@ -3277,6 +3298,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .began:
             suppressNextButtonRelease = true
             resetMultiTapState()
+            activeFlickDirection = .center
             hideFlickGuide()
             handleDeleteKey()
             startDeleteRepeat()
@@ -3414,7 +3436,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     private func flickDirection(for button: KeyboardButton, event: UIEvent) -> FlickDirection {
-        guard let touch = event.touches(for: button)?.first ?? activeKanaTouch ?? event.allTouches?.first else {
+        guard let touch = event.touches(for: button)?.first ?? activeKanaTouch ?? activeQWERTYTouch ?? event.allTouches?.first else {
             return .center
         }
 
@@ -3506,6 +3528,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         switch key.label {
+        case "゛゜小":
+            switch direction {
+            case .center:
+                return "゛゜小"
+            case .left:
+                return "゛"
+            case .up:
+                return "小"
+            case .right:
+                return "゜"
+            case .down:
+                return nil
+            }
         case "や":
             switch direction {
             case .center:
@@ -3692,10 +3727,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func keyRequiringFlickTracking(from action: KeyAction) -> KanaKey? {
+    private func isFlickTrackableAction(_ action: KeyAction) -> Bool {
+        if case .delete = action {
+            return true
+        }
+        return flickGuideKey(from: action) != nil
+    }
+
+    private func flickGuideKey(from action: KeyAction) -> KanaKey? {
         switch action {
         case .kana(let key), .flickOnly(let key):
             return key
+        case .transform:
+            return KanaKey(label: "゛゜小", candidates: [])
         default:
             return nil
         }
@@ -3880,6 +3924,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     private func handleDeleteKey() {
+        if activeFlickDirection == .left {
+            handleDeleteLeftFlick()
+            return
+        }
+
         if currentSumireKeyboard.kind == .qwerty,
            currentSumireKeyboard.qwertyLanguage == .japanese,
            qwertyRawInput.isEmpty == false {
@@ -3893,6 +3942,40 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         deleteBackward()
+    }
+
+    private func handleDeleteLeftFlick() {
+        if isDirectMode == false, composingText.isEmpty == false {
+            clearPreedit()
+            return
+        }
+
+        deleteHostTextBackToDelimiter()
+    }
+
+    private func deleteHostTextBackToDelimiter() {
+        guard let context = textDocumentProxy.documentContextBeforeInput,
+              context.isEmpty == false else {
+            textDocumentProxy.deleteBackward()
+            return
+        }
+
+        deleteBackwardImmediately(count: hostDeleteCountBackToDelimiter(in: context))
+    }
+
+    private func hostDeleteCountBackToDelimiter(in context: String) -> Int {
+        let characters = Array(context)
+        guard let delimiterIndex = characters.indices.last(where: { index in
+            Self.hostDeletionDelimiters.contains(characters[index])
+        }) else {
+            return characters.count
+        }
+
+        let countAfterDelimiter = characters.distance(
+            from: characters.index(after: delimiterIndex),
+            to: characters.endIndex
+        )
+        return max(countAfterDelimiter, 1)
     }
 
     private func handleMoveLeftKey() {
@@ -4686,7 +4769,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func replacePreviousComposingCharacter(with text: String) {
+    private func replacePreviousComposingCharacter(with text: String, resetsConversionRange: Bool = true) {
         guard isDirectMode == false else {
             textDocumentProxy.insertText(text)
             return
@@ -4708,10 +4791,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             renderedComposingText = nextText
             composingCursorPosition = composingCursorPosition - 1 + text.count
             renderedCursorPosition = renderedCursorPosition - 1 + text.count
-            updateCompositionStateAfterTextMutation(resetsConversionRange: true)
+            updateCompositionStateAfterTextMutation(resetsConversionRange: resetsConversionRange)
         } else {
             composingCursorPosition = composingCursorPosition - 1 + text.count
-            setComposingText(nextText)
+            setComposingText(nextText, resetsConversionRange: resetsConversionRange)
         }
     }
 
@@ -4775,6 +4858,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         renderedComposingText = ""
         composingCursorPosition = 0
         renderedCursorPosition = 0
+        conversionRange = 0..<0
+        underlineRange = nil
+        syncPrecompositionPhaseForCurrentText()
+        updatePreedit()
+    }
+
+    private func clearPreedit() {
+        qwertyRawInput = ""
+        resetMainKeyboardContentModeToKeyboard()
+        moveHostCursorToRenderedEnd()
+        deleteRenderedComposingText()
+        composingText = ""
+        composingCursorPosition = 0
         conversionRange = 0..<0
         underlineRange = nil
         syncPrecompositionPhaseForCurrentText()
@@ -4878,11 +4974,21 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             return
         }
 
-        for _ in renderedComposingText {
-            textDocumentProxy.deleteBackward()
-        }
+        deleteBackwardImmediately(count: renderedComposingText.count)
         renderedComposingText = ""
         renderedCursorPosition = 0
+    }
+
+    private func deleteBackwardImmediately(count: Int) {
+        guard count > 0 else {
+            return
+        }
+
+        UIView.performWithoutAnimation {
+            for _ in 0..<count {
+                textDocumentProxy.deleteBackward()
+            }
+        }
     }
 
     private func deleteBackward() {
@@ -5313,23 +5419,35 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         return katakana.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? katakana
     }
 
-    private func transformPreviousCharacter() {
+    private func transformPreviousCharacter(direction: FlickDirection = .center) {
         resetMultiTapState()
 
-        if let previousCharacter = composingText.last,
-           let transformedCharacter = transformedCharacter(after: previousCharacter) {
-            var nextText = composingText
-            nextText.removeLast()
-            nextText.append(transformedCharacter)
-            setComposingText(nextText, resetsConversionRange: false)
+        if let previousCharacter = previousComposingCharacterBeforeCursor(),
+           let transformedCharacter = transformedCharacter(after: previousCharacter, direction: direction) {
+            replacePreviousComposingCharacter(with: String(transformedCharacter), resetsConversionRange: false)
         } else if let previousCharacter = textDocumentProxy.documentContextBeforeInput?.last,
-                  let transformedCharacter = transformedCharacter(after: previousCharacter) {
+                  let transformedCharacter = transformedCharacter(after: previousCharacter, direction: direction) {
             textDocumentProxy.deleteBackward()
             textDocumentProxy.insertText(String(transformedCharacter))
         }
     }
 
-    private func transformedCharacter(after character: Character) -> Character? {
+    private func transformedCharacter(after character: Character, direction: FlickDirection = .center) -> Character? {
+        switch direction {
+        case .center:
+            return toggledJapaneseVariant(after: character)
+        case .left:
+            return voicedCharacter(for: character)
+        case .up:
+            return smallCharacter(for: character)
+        case .right:
+            return semiVoicedCharacter(for: character)
+        case .down:
+            return nil
+        }
+    }
+
+    private func toggledJapaneseVariant(after character: Character) -> Character? {
         let cycles: [[Character]] = [
             ["あ", "ぁ"], ["い", "ぃ"], ["う", "ぅ"], ["え", "ぇ"], ["お", "ぉ"],
             ["や", "ゃ"], ["ゆ", "ゅ"], ["よ", "ょ"], ["つ", "っ", "づ"], ["わ", "ゎ"],
@@ -5351,6 +5469,45 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         return cycle[(index + 1) % cycle.count]
+    }
+
+    private func voicedCharacter(for character: Character) -> Character? {
+        let groups: [[Character]] = [
+            ["か", "が"], ["き", "ぎ"], ["く", "ぐ"], ["け", "げ"], ["こ", "ご"],
+            ["さ", "ざ"], ["し", "じ"], ["す", "ず"], ["せ", "ぜ"], ["そ", "ぞ"],
+            ["た", "だ"], ["ち", "ぢ"], ["つ", "づ"], ["っ", "づ"], ["て", "で"], ["と", "ど"],
+            ["は", "ば"], ["ひ", "び"], ["ふ", "ぶ"], ["へ", "べ"], ["ほ", "ぼ"],
+            ["ぱ", "ば"], ["ぴ", "び"], ["ぷ", "ぶ"], ["ぺ", "べ"], ["ぽ", "ぼ"],
+            ["カ", "ガ"], ["キ", "ギ"], ["ク", "グ"], ["ケ", "ゲ"], ["コ", "ゴ"],
+            ["サ", "ザ"], ["シ", "ジ"], ["ス", "ズ"], ["セ", "ゼ"], ["ソ", "ゾ"],
+            ["タ", "ダ"], ["チ", "ヂ"], ["ツ", "ヅ"], ["ッ", "ヅ"], ["テ", "デ"], ["ト", "ド"],
+            ["ハ", "バ"], ["ヒ", "ビ"], ["フ", "ブ"], ["ヘ", "ベ"], ["ホ", "ボ"],
+            ["パ", "バ"], ["ピ", "ビ"], ["プ", "ブ"], ["ペ", "ベ"], ["ポ", "ボ"]
+        ]
+
+        return groups.first(where: { $0.contains(character) })?.last
+    }
+
+    private func semiVoicedCharacter(for character: Character) -> Character? {
+        let groups: [[Character]] = [
+            ["は", "ば", "ぱ"], ["ひ", "び", "ぴ"], ["ふ", "ぶ", "ぷ"],
+            ["へ", "べ", "ぺ"], ["ほ", "ぼ", "ぽ"],
+            ["ハ", "バ", "パ"], ["ヒ", "ビ", "ピ"], ["フ", "ブ", "プ"],
+            ["ヘ", "ベ", "ペ"], ["ホ", "ボ", "ポ"]
+        ]
+
+        return groups.first(where: { $0.contains(character) })?.last
+    }
+
+    private func smallCharacter(for character: Character) -> Character? {
+        let groups: [[Character]] = [
+            ["あ", "ぁ"], ["い", "ぃ"], ["う", "ぅ"], ["え", "ぇ"], ["お", "ぉ"],
+            ["や", "ゃ"], ["ゆ", "ゅ"], ["よ", "ょ"], ["つ", "っ"], ["わ", "ゎ"],
+            ["ア", "ァ"], ["イ", "ィ"], ["ウ", "ゥ"], ["エ", "ェ"], ["オ", "ォ"],
+            ["ヤ", "ャ"], ["ユ", "ュ"], ["ヨ", "ョ"], ["ツ", "ッ"], ["ワ", "ヮ"]
+        ]
+
+        return groups.first(where: { $0.contains(character) })?.last
     }
 
     private func resetMultiTapState() {
