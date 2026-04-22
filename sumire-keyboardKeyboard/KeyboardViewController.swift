@@ -1215,7 +1215,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
         },
         onModeBegan: { [weak self] in
-//            self?.beginSpaceCursorMoveMode()
+            self?.beginSpaceCursorMoveMode()
         },
         onModeEnded: { [weak self] in
             self?.endSpaceCursorMoveMode()
