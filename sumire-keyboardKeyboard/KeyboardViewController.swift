@@ -178,12 +178,13 @@ final class KeyboardViewController: UIInputViewController {
         var containerWidth: CGFloat
     }
 
-    private final class KeyboardButton: UIButton {
+    private final class KeyboardButton: UIButton, KeyboardContentHidable {
         let action: KeyAction
         private let normalBackgroundColor: UIColor
         private let highlightedBackgroundColor: UIColor
         private let normalForegroundColor: UIColor
         private var stackedTitleStack: UIStackView?
+        private var isKeyboardContentHidden = false
         var usesTapOnlyHighlight = false {
             didSet {
                 updateBackgroundForCurrentState()
@@ -262,7 +263,9 @@ final class KeyboardViewController: UIInputViewController {
             updatedConfiguration?.baseBackgroundColor = showsHighlight
                 ? highlightedBackgroundColor
                 : normalBackgroundColor
+            updatedConfiguration?.baseForegroundColor = currentForegroundColor()
             configuration = updatedConfiguration
+            applyContentVisibility()
         }
 
         func flashTapHighlight() {
@@ -279,7 +282,9 @@ final class KeyboardViewController: UIInputViewController {
             var updatedConfiguration = configuration
             updatedConfiguration?.title = title
             updatedConfiguration?.image = nil
+            updatedConfiguration?.baseForegroundColor = currentForegroundColor()
             configuration = updatedConfiguration
+            applyContentVisibility()
         }
 
         func updateSystemImage(_ systemImageName: String) {
@@ -291,15 +296,18 @@ final class KeyboardViewController: UIInputViewController {
                 pointSize: 19,
                 weight: .semibold
             )
+            updatedConfiguration?.baseForegroundColor = currentForegroundColor()
             configuration = updatedConfiguration
+            applyContentVisibility()
         }
 
         func setFunctionEnabled(_ isEnabled: Bool) {
             self.isEnabled = isEnabled
             alpha = isEnabled ? 1 : 0.38
             var updatedConfiguration = configuration
-            updatedConfiguration?.baseForegroundColor = isEnabled ? normalForegroundColor : .secondaryLabel
+            updatedConfiguration?.baseForegroundColor = currentForegroundColor()
             configuration = updatedConfiguration
+            applyContentVisibility()
         }
 
         func configureStackedTitle(
@@ -341,12 +349,38 @@ final class KeyboardViewController: UIInputViewController {
 
             addSubview(stack)
             stackedTitleStack = stack
+            applyContentVisibility()
             NSLayoutConstraint.activate([
                 stack.centerXAnchor.constraint(equalTo: centerXAnchor),
                 stack.centerYAnchor.constraint(equalTo: centerYAnchor),
                 stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
                 stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4)
             ])
+        }
+
+        func setKeyboardContentHidden(_ isHidden: Bool) {
+            guard isKeyboardContentHidden != isHidden else {
+                return
+            }
+
+            isKeyboardContentHidden = isHidden
+            updateBackgroundForCurrentState()
+        }
+
+        private func currentForegroundColor() -> UIColor {
+            if isKeyboardContentHidden {
+                return .clear
+            }
+
+            return isEnabled ? normalForegroundColor : .secondaryLabel
+        }
+
+        private func applyContentVisibility() {
+            let contentAlpha: CGFloat = isKeyboardContentHidden ? 0 : 1
+            titleLabel?.alpha = contentAlpha
+            imageView?.alpha = contentAlpha
+            stackedTitleStack?.alpha = contentAlpha
+            tintColor = currentForegroundColor()
         }
 
         private func removeStackedTitle() {
@@ -1014,6 +1048,25 @@ final class KeyboardViewController: UIInputViewController {
     private let keyboardStack = UIStackView()
     private let mainKeyboardContainer = UIView()
     private let flickGuideView = FlickGuideView()
+    private lazy var keyboardVisualModeController = KeyboardVisualModeController(contentRootView: keyboardStack)
+    private lazy var cursorMoveController = CursorMoveController(
+        trackingView: self.view,
+        canBegin: { [weak self] in
+            self?.canBeginSpaceCursorMoveMode == true
+        },
+        adjustTextPosition: { [weak self] offset in
+            self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: offset)
+        },
+        onModeBegan: { [weak self] in
+            self?.beginSpaceCursorMoveMode()
+        },
+        onModeEnded: { [weak self] in
+            self?.endSpaceCursorMoveMode()
+        },
+        onTrackingFinished: { [weak self] in
+            self?.finishSpaceCursorMoveTracking()
+        }
+    )
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 40
     private let conversionBeamWidth = 20
@@ -1107,6 +1160,7 @@ final class KeyboardViewController: UIInputViewController {
         scheduledKanaKanjiLoad = nil
         stopDeleteRepeat()
         stopCursorRepeat()
+        cursorMoveController.cancelTracking()
         stopReverseCycleStateTimer()
         exitKeyboardResizeMode()
         commitRenderedComposingTextAsTyped()
@@ -1727,6 +1781,8 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func rebuildKeyboardLayout() {
+        cursorMoveController.cancelTracking()
+        keyboardVisualModeController.setMode(.normal)
         NSLayoutConstraint.deactivate(keyboardLayoutConstraints)
         keyboardLayoutConstraints.removeAll()
 
@@ -2608,6 +2664,8 @@ final class KeyboardViewController: UIInputViewController {
             longPress.minimumPressDuration = 0.35
             longPress.cancelsTouchesInView = false
             button.addGestureRecognizer(longPress)
+        } else if case .space = button.action {
+            button.addGestureRecognizer(cursorMoveController.makeSpaceLongPressGestureRecognizer())
         } else if case .delete = button.action {
             let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleDeleteLongPress(_:)))
             longPress.minimumPressDuration = 0.35
@@ -2617,6 +2675,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDown(_ sender: KeyboardButton, event: UIEvent) {
+        guard cursorMoveController.isCursorMoveMode == false else {
+            return
+        }
+
         if currentSumireKeyboard.kind == .qwerty, isQWERTYSelectableAction(sender.action) {
             releaseActiveQWERTYButtonIfNeeded(beforeActivating: sender)
             setActiveQWERTYButton(sender)
@@ -2637,6 +2699,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchDrag(_ sender: KeyboardButton, event: UIEvent) {
+        guard cursorMoveController.isCursorMoveMode == false else {
+            return
+        }
+
         if currentSumireKeyboard.kind == .qwerty {
             updateActiveQWERTYButton(from: event, fallback: sender)
             return
@@ -2665,6 +2731,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func handleTouchCancel(_ sender: KeyboardButton) {
+        if cursorMoveController.isCursorMoveMode {
+            cursorMoveController.cancelTracking()
+            sender.isHighlighted = false
+            return
+        }
+
         if shouldSuppressRelease(for: sender, event: nil) {
             sender.isHighlighted = false
             return
@@ -2853,6 +2925,47 @@ final class KeyboardViewController: UIInputViewController {
             }
         default:
             break
+        }
+    }
+
+    private var canBeginSpaceCursorMoveMode: Bool {
+        resizeOverlayView == nil && hasActivePreedit == false
+    }
+
+    private var hasActivePreedit: Bool {
+        if composingText.isEmpty == false || renderedComposingText.isEmpty == false || qwertyRawInput.isEmpty == false {
+            return true
+        }
+
+        guard case .precomposition(let status) = inputStatus else {
+            return false
+        }
+
+        return status.phase != .empty
+    }
+
+    private func beginSpaceCursorMoveMode() {
+        suppressNextButtonRelease = true
+        resetMultiTapState()
+        stopDeleteRepeat()
+        stopCursorRepeat()
+        hideFlickGuide()
+        clearActiveKanaButton()
+        clearActiveQWERTYButton()
+        keyboardVisualModeController.setMode(.cursorMove)
+    }
+
+    private func endSpaceCursorMoveMode() {
+        keyboardVisualModeController.setMode(.normal)
+        hideFlickGuide()
+        clearActiveKanaButton()
+        clearActiveQWERTYButton()
+        activeFlickDirection = .center
+    }
+
+    private func finishSpaceCursorMoveTracking() {
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressNextButtonRelease = false
         }
     }
 
