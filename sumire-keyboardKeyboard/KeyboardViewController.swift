@@ -5346,8 +5346,16 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             return
         }
 
-        guard let artifactsDirectory = kanaKanjiArtifactsDirectory() else {
+        let resources = KanaKanjiBundleResources()
+        guard let mainArtifactsDirectory = resources.mainArtifactsDirectory() else {
             converterLoadFailureMessage = "KanaKanji resources were not found in the keyboard bundle."
+            return
+        }
+
+        let sharedPOSTableURL = resources.sharedPOSTableURL()
+        let supplementalArtifactDirectories = resources.availableSupplementalArtifactDirectories()
+        guard let connectionMatrixURL = resources.connectionMatrixURL(forMainArtifactsDirectory: mainArtifactsDirectory) else {
+            converterLoadFailureMessage = "KanaKanji connection matrix was not found in the keyboard bundle."
             return
         }
 
@@ -5357,12 +5365,56 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             let result: Result<KanaKanjiConverter, Error>
 
             do {
-                let dictionary = try MozcDictionary(artifactsDirectory: artifactsDirectory)
-                let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(
-                    artifactsDirectory.appendingPathComponent("connection_single_column.bin")
+                let mainDictionary = try MozcDictionary(
+                    artifactsDirectory: mainArtifactsDirectory,
+                    sharedPOSTableURL: sharedPOSTableURL
                 )
+                var loadedSupplementals: [SupplementalDictionaryKind: MozcDictionary] = [:]
+                var loadedSupplementalNames: [String] = []
+                var missingSupplementalNames: [String] = []
+                var failedSupplementalMessages: [String] = []
+
+                for kind in SupplementalDictionaryKind.allCases {
+                    guard let directory = supplementalArtifactDirectories[kind] else {
+                        missingSupplementalNames.append(kind.resourceDirectoryName)
+                        continue
+                    }
+
+                    do {
+                        loadedSupplementals[kind] = try MozcDictionary(
+                            artifactsDirectory: directory,
+                            sharedPOSTableURL: sharedPOSTableURL
+                        )
+                        loadedSupplementalNames.append(kind.resourceDirectoryName)
+                    } catch {
+                        failedSupplementalMessages.append("\(kind.resourceDirectoryName): \(error.localizedDescription)")
+                    }
+                }
+
+                if failedSupplementalMessages.isEmpty {
+                    NSLog(
+                        "KanaKanji dictionaries loaded. main=%@ supplementals=%@ missing=%@",
+                        mainArtifactsDirectory.path,
+                        loadedSupplementalNames.joined(separator: ","),
+                        missingSupplementalNames.joined(separator: ",")
+                    )
+                } else {
+                    NSLog(
+                        "KanaKanji dictionaries loaded with supplemental failures. main=%@ loaded=%@ missing=%@ failed=%@",
+                        mainArtifactsDirectory.path,
+                        loadedSupplementalNames.joined(separator: ","),
+                        missingSupplementalNames.joined(separator: ","),
+                        failedSupplementalMessages.joined(separator: " | ")
+                    )
+                }
+
+                let dictionarySet = LoadedDictionarySet(
+                    main: mainDictionary,
+                    supplementals: SupplementalDictionaryStore(loadedSupplementals)
+                )
+                let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(connectionMatrixURL)
                 result = .success(KanaKanjiConverter(
-                    dictionary: dictionary,
+                    dictionarySet: dictionarySet,
                     connectionMatrix: connectionMatrix
                 ))
             } catch {
@@ -5386,26 +5438,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 }
                 self.renderCurrentComposingText()
                 self.updatePreedit()
-            }
-        }
-    }
-
-    private func kanaKanjiArtifactsDirectory() -> URL? {
-        let fileManager = FileManager.default
-        var candidateDirectories: [URL] = []
-
-        if let bundledDirectory = Bundle.main.url(forResource: "KanaKanjiResources", withExtension: nil) {
-            candidateDirectories.append(bundledDirectory)
-        }
-
-        if let resourceDirectory = Bundle.main.resourceURL {
-            candidateDirectories.append(resourceDirectory.appendingPathComponent("KanaKanjiResources", isDirectory: true))
-            candidateDirectories.append(resourceDirectory)
-        }
-
-        return candidateDirectories.first { directory in
-            MozcDictionary.artifactFileNames.allSatisfy { fileName in
-                fileManager.fileExists(atPath: directory.appendingPathComponent(fileName).path)
             }
         }
     }

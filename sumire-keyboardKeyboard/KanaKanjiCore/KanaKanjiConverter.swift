@@ -123,11 +123,16 @@ public struct KanaKanjiConverter: Sendable {
         }
     }
 
-    private let dictionary: MozcDictionary
+    private let dictionary: CompositeMozcDictionary
     private let connectionMatrix: ConnectionMatrix?
 
     public init(dictionary: MozcDictionary, connectionMatrix: ConnectionMatrix? = nil) {
-        self.dictionary = dictionary
+        self.dictionary = CompositeMozcDictionary(main: dictionary)
+        self.connectionMatrix = connectionMatrix
+    }
+
+    public init(dictionarySet: LoadedDictionarySet, connectionMatrix: ConnectionMatrix? = nil) {
+        self.dictionary = CompositeMozcDictionary(dictionarySet: dictionarySet)
         self.connectionMatrix = connectionMatrix
     }
 

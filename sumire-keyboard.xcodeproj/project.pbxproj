@@ -78,6 +78,11 @@
 		};
 		B10000000000000000000005 /* sumire-keyboardKeyboard */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+				KanaKanjiResources,
+			);
 			path = "sumire-keyboardKeyboard";
 			sourceTree = "<group>";
 		};

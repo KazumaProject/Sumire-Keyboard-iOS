@@ -1,20 +1,68 @@
 import Foundation
 
 enum MozcArtifactIO {
-    static let requiredFileNames = [
+    static let dictionaryFileNames = [
         "yomi_termid.louds",
         "tango.louds",
-        "token_array.bin",
-        "pos_table.bin",
-        "connection_single_column.bin"
+        "token_array.bin"
     ]
 
-    static func loadDictionary(from directory: URL) throws -> MozcArtifactDictionary {
-        MozcArtifactDictionary(
+    static let posTableFileName = "pos_table.bin"
+    static let connectionMatrixFileName = "connection_single_column.bin"
+
+    static let requiredFileNames = dictionaryFileNames + [
+        posTableFileName,
+        connectionMatrixFileName
+    ]
+
+    static func loadDictionary(
+        from directory: URL,
+        sharedPOSTableURL: URL? = nil
+    ) throws -> MozcArtifactDictionary {
+        let posTableURL = try resolvedPOSTableURL(
+            for: directory,
+            sharedPOSTableURL: sharedPOSTableURL
+        )
+
+        return MozcArtifactDictionary(
             yomiTerm: try readLOUDSWithTermId(directory.appendingPathComponent("yomi_termid.louds")),
             tango: try readLOUDS(directory.appendingPathComponent("tango.louds")),
             tokens: try readTokenArray(directory.appendingPathComponent("token_array.bin")),
-            posTable: try readPosTable(directory.appendingPathComponent("pos_table.bin"))
+            posTable: try readPosTable(posTableURL)
+        )
+    }
+
+    static func containsDictionaryArtifacts(at directory: URL) -> Bool {
+        let fileManager = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return false
+        }
+
+        return dictionaryFileNames.allSatisfy { fileName in
+            fileManager.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+        }
+    }
+
+    private static func resolvedPOSTableURL(
+        for directory: URL,
+        sharedPOSTableURL: URL?
+    ) throws -> URL {
+        let localURL = directory.appendingPathComponent(posTableFileName)
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: localURL.path) {
+            return localURL
+        }
+
+        if let sharedPOSTableURL,
+           fileManager.fileExists(atPath: sharedPOSTableURL.path) {
+            return sharedPOSTableURL
+        }
+
+        throw KanaKanjiError.posTableNotFound(
+            artifactsDirectory: directory,
+            sharedPOSTableURL: sharedPOSTableURL
         )
     }
 
