@@ -62,9 +62,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let candidates: [String]
     }
 
-    private struct ConversionCandidateItem: Equatable, Sendable {
+    private enum ConversionCandidateSource: Hashable, Sendable {
+        case main
+        case auxiliary
+        case fallback
+        case singleKanji
+        case english
+        case direct
+    }
+
+    private struct ConversionCandidateItem: Hashable, Sendable {
         let text: String
         let consumedReadingLength: Int
+        let source: ConversionCandidateSource
+    }
+
+    private struct CandidateButtonConfiguration: Hashable {
+        let title: String
+        let committedCandidate: ConversionCandidateItem?
+        let isEnabled: Bool
+        let isSelected: Bool
+    }
+
+    private enum CandidateBarSection: Hashable {
+        case main
     }
 
     private struct ScoredConversionCandidateItem: Sendable {
@@ -413,73 +434,77 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private final class CandidateButton: UIButton {
-        var committedCandidate: ConversionCandidateItem?
+    private final class CandidateBarCell: UICollectionViewCell {
+        static let reuseIdentifier = "CandidateBarCell"
+        private static let minimumWidth: CGFloat = 72
+        private static let maximumWidth: CGFloat = 220
+        private static let cellHeight: CGFloat = 32
 
-        init() {
-            super.init(frame: .zero)
+        private let titleLabel = UILabel()
 
-            var configuration = UIButton.Configuration.filled()
-            configuration.title = "候補"
-            configuration.baseBackgroundColor = KeyboardTheme.candidateBackground
-            configuration.baseForegroundColor = .label
-            configuration.cornerStyle = .medium
-            configuration.titleLineBreakMode = .byTruncatingTail
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
-            self.configuration = configuration
-            titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
-            titleLabel?.adjustsFontSizeToFitWidth = true
-            titleLabel?.minimumScaleFactor = 0.72
-            titleLabel?.numberOfLines = 1
-            titleLabel?.lineBreakMode = .byTruncatingTail
-            setContentHuggingPriority(.required, for: .horizontal)
-            setContentCompressionResistancePriority(.required, for: .horizontal)
-            layer.cornerRadius = 8
-            layer.borderWidth = 0
-            layer.borderColor = UIColor.clear.cgColor
-            translatesAutoresizingMaskIntoConstraints = false
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            contentView.backgroundColor = KeyboardTheme.candidateBackground
+            contentView.layer.cornerRadius = 8
+            contentView.layer.masksToBounds = true
+            contentView.layer.borderWidth = 0
+            contentView.layer.borderColor = UIColor.clear.cgColor
+
+            titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+            titleLabel.textColor = .label
+            titleLabel.numberOfLines = 1
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.adjustsFontSizeToFitWidth = true
+            titleLabel.minimumScaleFactor = 0.72
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(titleLabel)
+
+            NSLayoutConstraint.activate([
+                titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 1),
+                titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+                titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
+                titleLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -1),
+                contentView.heightAnchor.constraint(equalToConstant: Self.cellHeight),
+                contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumWidth),
+                titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.maximumWidth)
+            ])
         }
 
         required init?(coder: NSCoder) {
             return nil
         }
 
-        override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-            super.traitCollectionDidChange(previousTraitCollection)
-            updateColorsForCurrentTraits()
+        override func prepareForReuse() {
+            super.prepareForReuse()
+            titleLabel.text = nil
+            configure(title: "候補", isEnabled: false, isSelected: false)
         }
 
-        func configure(
-            title: String,
-            committedCandidate: ConversionCandidateItem?,
-            isEnabled: Bool,
-            isSelected: Bool = false
-        ) {
-            self.committedCandidate = committedCandidate
-            self.isEnabled = isEnabled
-            self.isSelected = isSelected
-            alpha = isEnabled ? 1 : 0.55
+        override func preferredLayoutAttributesFitting(
+            _ layoutAttributes: UICollectionViewLayoutAttributes
+        ) -> UICollectionViewLayoutAttributes {
+            setNeedsLayout()
+            layoutIfNeeded()
 
-            var newConfiguration = self.configuration
-            newConfiguration?.title = title
-            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
-            newConfiguration?.titleLineBreakMode = .byTruncatingTail
-            self.configuration = newConfiguration
-            titleLabel?.numberOfLines = 1
-            titleLabel?.lineBreakMode = .byTruncatingTail
-            updateColorsForCurrentTraits()
+            let fittingSize = contentView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let attributes = layoutAttributes.copy() as? UICollectionViewLayoutAttributes ?? layoutAttributes
+            attributes.frame.size = CGSize(
+                width: max(Self.minimumWidth, ceil(fittingSize.width)),
+                height: Self.cellHeight
+            )
+            return attributes
         }
 
-        private func updateColorsForCurrentTraits() {
-            var newConfiguration = self.configuration
-            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
-            self.configuration = newConfiguration
-            layer.borderWidth = isSelected ? 0.5 : 0
-            layer.borderColor = isSelected
+        func configure(title: String, isEnabled: Bool, isSelected: Bool) {
+            titleLabel.text = title
+            titleLabel.textColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
+            contentView.backgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
+            contentView.layer.borderWidth = isSelected ? 0.5 : 0
+            contentView.layer.borderColor = isSelected
                 ? UIColor.systemBlue.resolvedColor(with: traitCollection).cgColor
                 : UIColor.clear.cgColor
+            alpha = isEnabled ? 1 : 0.55
         }
     }
 
@@ -1209,13 +1234,12 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var conversionCandidateLookupKey: ConversionCandidateLookupKey?
     private var conversionCandidateLookupInFlightKey: ConversionCandidateLookupKey?
     private var conversionCandidateLookupResults: [ConversionCandidateItem] = []
-    private var candidateButtons: [CandidateButton] = []
     private var candidateListCandidates: [ConversionCandidateItem] = []
     private var candidateListSelectedCandidateIndex: Int?
+    private var candidateBarDataSource: UICollectionViewDiffableDataSource<CandidateBarSection, CandidateButtonConfiguration>?
     private let preeditReadingView = PreeditReadingView()
     private let candidateRowContainer = UIStackView()
-    private let candidateScrollView = UIScrollView()
-    private let candidateStack = UIStackView()
+    private lazy var candidateBarCollectionView = makeCandidateBarCollectionView()
     private let candidateToggleContainer = UIView()
     private let candidateListToggleButton = UIButton(type: .system)
     private let emptyPreeditToolbar = UIStackView()
@@ -1317,7 +1341,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         view.backgroundColor = KeyboardTheme.keyboardBackground
         flickGuideView.setNeedsLayout()
         updatePreeditReadingPreview()
-        candidateButtons.forEach { $0.setNeedsLayout() }
+        candidateBarCollectionView.visibleCells.forEach { $0.setNeedsLayout() }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -1442,35 +1466,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         candidateRowContainer.spacing = 0
         candidateRowContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        candidateScrollView.showsHorizontalScrollIndicator = true
-        candidateScrollView.alwaysBounceHorizontal = true
-        candidateScrollView.backgroundColor = .clear
-        candidateScrollView.translatesAutoresizingMaskIntoConstraints = false
-
         candidateToggleContainer.backgroundColor = .clear
         candidateToggleContainer.translatesAutoresizingMaskIntoConstraints = false
 
         let toggleButton = makeCandidateListToggleButton()
         candidateToggleContainer.addSubview(toggleButton)
 
-        candidateStack.axis = .horizontal
-        candidateStack.alignment = .fill
-        candidateStack.distribution = .fill
-        candidateStack.spacing = 6
-        candidateStack.translatesAutoresizingMaskIntoConstraints = false
-        candidateScrollView.addSubview(candidateStack)
+        let candidateCollectionView = candidateBarCollectionView
         configureEmptyPreeditToolbar()
 
-        candidateRowContainer.addArrangedSubview(candidateScrollView)
+        candidateRowContainer.addArrangedSubview(candidateCollectionView)
         candidateRowContainer.addArrangedSubview(candidateToggleContainer)
 
         NSLayoutConstraint.activate([
-            candidateStack.topAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.topAnchor),
-            candidateStack.leadingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.leadingAnchor),
-            candidateStack.trailingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.trailingAnchor),
-            candidateStack.bottomAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.bottomAnchor),
-            candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor),
-
             // Toggle 領域を Auto Layout 上で分離し、候補が右端ボタンの下へ潜り込まないようにする。
             candidateToggleContainer.widthAnchor.constraint(equalToConstant: 42),
             toggleButton.centerXAnchor.constraint(equalTo: candidateToggleContainer.centerXAnchor),
@@ -1486,6 +1494,48 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         emptyPreeditToolbar.isHidden = true
         updateCandidateListToggleAppearance()
         return candidateBar
+    }
+
+    private func makeCandidateBarCollectionView() -> UICollectionView {
+        let layout = UICollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.estimatedItemSize = UICollectionViewFlowLayout.automaticSize
+        layout.minimumInteritemSpacing = 6
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 0)
+
+        let collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        collectionView.backgroundColor = .clear
+        collectionView.alwaysBounceHorizontal = true
+        collectionView.showsHorizontalScrollIndicator = true
+        collectionView.showsVerticalScrollIndicator = false
+        collectionView.translatesAutoresizingMaskIntoConstraints = false
+        collectionView.register(
+            CandidateBarCell.self,
+            forCellWithReuseIdentifier: CandidateBarCell.reuseIdentifier
+        )
+        collectionView.delegate = self
+
+        candidateBarDataSource = UICollectionViewDiffableDataSource<CandidateBarSection, CandidateButtonConfiguration>(
+            collectionView: collectionView
+        ) { collectionView, indexPath, configuration in
+            guard let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: CandidateBarCell.reuseIdentifier,
+                for: indexPath
+            ) as? CandidateBarCell else {
+                return UICollectionViewCell()
+            }
+
+            cell.configure(
+                title: configuration.title,
+                isEnabled: configuration.isEnabled,
+                isSelected: configuration.isSelected
+            )
+            return cell
+        }
+
+        applyCandidateButtonConfigurations([])
+        return collectionView
     }
 
     private func makeCandidateListToggleButton() -> UIButton {
@@ -2180,13 +2230,20 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         _ collectionView: UICollectionView,
         numberOfItemsInSection section: Int
     ) -> Int {
-        candidateListCandidates.count
+        guard collectionView === candidateListCollectionView else {
+            return 0
+        }
+        return candidateListCandidates.count
     }
 
     func collectionView(
         _ collectionView: UICollectionView,
         cellForItemAt indexPath: IndexPath
     ) -> UICollectionViewCell {
+        guard collectionView === candidateListCollectionView else {
+            return UICollectionViewCell()
+        }
+
         guard let cell = collectionView.dequeueReusableCell(
             withReuseIdentifier: CandidateListCell.reuseIdentifier,
             for: indexPath
@@ -2204,6 +2261,17 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        if collectionView === candidateBarCollectionView {
+            guard let configuration = candidateBarDataSource?.itemIdentifier(for: indexPath),
+                  configuration.isEnabled,
+                  let candidate = configuration.committedCandidate else {
+                return
+            }
+
+            commitCandidateItem(candidate)
+            return
+        }
+
         guard candidateListCandidates.indices.contains(indexPath.item) else {
             return
         }
@@ -3299,14 +3367,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         handleInputModeList(from: sender, with: event)
     }
 
-    @objc private func commitCandidate(_ sender: CandidateButton) {
-        guard let candidate = sender.committedCandidate else {
-            return
-        }
-
-        commitCandidateItem(candidate)
-    }
-
     private func commitCandidateItem(_ candidate: ConversionCandidateItem) {
         resetMultiTapState()
         commitComposingText(candidate.text, consumedReadingLength: candidate.consumedReadingLength)
@@ -3805,45 +3865,56 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
         let showsEmptyToolbar = shouldShowEmptyPreeditToolbar
 
-        candidateButtons.removeAll()
-        for view in candidateStack.arrangedSubviews {
-            candidateStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
         updateCandidateBarMode(showsEmptyPreeditToolbar: showsEmptyToolbar)
 
         if showsEmptyToolbar {
-            candidateScrollView.setContentOffset(.zero, animated: false)
+            applyCandidateButtonConfigurations([])
+            candidateBarCollectionView.setContentOffset(.zero, animated: false)
             return
         }
 
         if mainKeyboardPanel == .emoji {
-            addCandidateButton(title: "絵文字辞書を準備中", committedCandidate: nil, isEnabled: false)
+            applyCandidateButtonConfigurations([
+                CandidateButtonConfiguration(
+                    title: "絵文字辞書を準備中",
+                    committedCandidate: nil,
+                    isEnabled: false,
+                    isSelected: false
+                )
+            ])
             return
         }
 
         guard isDirectMode == false else {
+            applyCandidateButtonConfigurations([])
             return
         }
 
         guard candidates.isEmpty == false else {
-            addCandidateButton(title: "候補", committedCandidate: nil, isEnabled: false)
+            applyCandidateButtonConfigurations([
+                CandidateButtonConfiguration(
+                    title: "候補",
+                    committedCandidate: nil,
+                    isEnabled: false,
+                    isSelected: false
+                )
+            ])
             return
         }
 
-        for (index, candidate) in candidates.enumerated() {
-            addCandidateButton(
+        applyCandidateButtonConfigurations(candidates.enumerated().map { index, candidate in
+            CandidateButtonConfiguration(
                 title: candidate.text,
                 committedCandidate: candidate,
                 isEnabled: true,
                 isSelected: index == selectedCandidateIndex
             )
-        }
+        })
 
         if let selectedCandidateIndex {
             scrollCandidateIntoView(at: selectedCandidateIndex)
         } else {
-            candidateScrollView.setContentOffset(.zero, animated: false)
+            candidateBarCollectionView.setContentOffset(.zero, animated: false)
         }
     }
 
@@ -3854,7 +3925,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private func updateCandidateBarMode(showsEmptyPreeditToolbar: Bool) {
         emptyPreeditToolbar.isHidden = showsEmptyPreeditToolbar == false
         candidateRowContainer.isHidden = showsEmptyPreeditToolbar
-        candidateScrollView.isHidden = showsEmptyPreeditToolbar
+        candidateBarCollectionView.isHidden = showsEmptyPreeditToolbar
         if showsEmptyPreeditToolbar {
             preeditReadingView.clear()
         }
@@ -3916,41 +3987,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         return true
     }
 
-    private func addCandidateButton(
-        title: String,
-        committedCandidate: ConversionCandidateItem?,
-        isEnabled: Bool,
-        isSelected: Bool = false
-    ) {
-        let button = CandidateButton()
-        button.configure(
-            title: title,
-            committedCandidate: committedCandidate,
-            isEnabled: isEnabled,
-            isSelected: isSelected
-        )
-        button.addTarget(self, action: #selector(commitCandidate(_:)), for: .touchUpInside)
-        candidateStack.addArrangedSubview(button)
-        candidateButtons.append(button)
-
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
-        ])
+    private func applyCandidateButtonConfigurations(_ configurations: [CandidateButtonConfiguration]) {
+        var snapshot = NSDiffableDataSourceSnapshot<CandidateBarSection, CandidateButtonConfiguration>()
+        snapshot.appendSections([.main])
+        snapshot.appendItems(configurations, toSection: .main)
+        candidateBarDataSource?.apply(snapshot, animatingDifferences: false)
     }
 
     private func scrollCandidateIntoView(at index: Int) {
-        guard candidateButtons.indices.contains(index) else {
+        guard index >= 0,
+              index < candidateBarCollectionView.numberOfItems(inSection: 0) else {
             return
         }
 
-        let button = candidateButtons[index]
-        DispatchQueue.main.async { [weak self, weak button] in
-            guard let self, let button else {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  index < self.candidateBarCollectionView.numberOfItems(inSection: 0) else {
                 return
             }
 
-            let frame = button.convert(button.bounds, to: self.candidateScrollView)
-            self.candidateScrollView.scrollRectToVisible(frame.insetBy(dx: -8, dy: 0), animated: true)
+            self.candidateBarCollectionView.scrollToItem(
+                at: IndexPath(item: index, section: 0),
+                at: .centeredHorizontally,
+                animated: true
+            )
         }
     }
 
@@ -5274,14 +5334,22 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         var seen = Set<String>()
         var candidates: [ConversionCandidateItem] = []
 
-        func appendUnique(_ text: String, consumedReadingLength: Int = targetText.count) {
+        func appendUnique(
+            _ text: String,
+            consumedReadingLength: Int = targetText.count,
+            source: ConversionCandidateSource
+        ) {
             guard text.isEmpty == false,
                   isDisplayableConversionCandidate(text),
                   seen.insert(text).inserted else {
                 return
             }
             let consumedLength = min(max(consumedReadingLength, 0), targetText.count)
-            candidates.append(ConversionCandidateItem(text: text, consumedReadingLength: consumedLength))
+            candidates.append(ConversionCandidateItem(
+                text: text,
+                consumedReadingLength: consumedLength,
+                source: source
+            ))
         }
 
         switch language {
@@ -5290,13 +5358,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .english:
             if let englishEngine {
                 for candidate in englishEngine.getPrediction(input: targetText).prefix(conversionCandidateLimit) {
-                    appendUnique(candidate.word)
+                    appendUnique(candidate.word, source: .english)
                 }
             }
-            appendUnique(targetText)
+            appendUnique(targetText, source: .fallback)
             return candidates
         case .number:
-            appendUnique(targetText)
+            appendUnique(targetText, source: .direct)
             return candidates
         }
 
@@ -5312,11 +5380,26 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 for: targetText,
                 baseScore: mainOptions.unknownWordCost
             ).map(\.item.text))
+            let singleKanjiOptions = ConversionOptions(
+                limit: singleKanjiConversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: .commonPrefix,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
+            let singleKanjiCandidates = kanaKanjiConverter.singleKanjiCandidates(
+                targetText,
+                options: singleKanjiOptions,
+                limit: singleKanjiConversionCandidateLimit
+            )
+            let singleKanjiTexts = Set(singleKanjiCandidates.map(\.text))
+
             for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
-                guard fallbackTexts.contains(candidate.text) == false else {
+                guard fallbackTexts.contains(candidate.text) == false,
+                      singleKanjiTexts.contains(candidate.text) == false else {
                     continue
                 }
-                appendUnique(candidate.text)
+                appendUnique(candidate.text, source: .main)
             }
 
             let auxiliaryOptions = ConversionOptions(
@@ -5334,11 +5417,15 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 options: auxiliaryOptions,
                 limit: auxiliaryConversionCandidateLimit
             ) {
+                guard singleKanjiTexts.contains(candidate.text) == false else {
+                    continue
+                }
                 auxiliaryCandidates.append(
                     ScoredConversionCandidateItem(
                         item: ConversionCandidateItem(
                             text: candidate.text,
-                            consumedReadingLength: candidate.consumedLength ?? candidate.reading.count
+                            consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                            source: .auxiliary
                         ),
                         score: candidate.score
                     )
@@ -5351,27 +5438,24 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             ))
 
             for candidate in auxiliaryCandidates.sorted(by: scoredCandidateSort) {
-                appendUnique(candidate.item.text, consumedReadingLength: candidate.item.consumedReadingLength)
+                appendUnique(
+                    candidate.item.text,
+                    consumedReadingLength: candidate.item.consumedReadingLength,
+                    source: candidate.item.source
+                )
             }
 
-            let singleKanjiOptions = ConversionOptions(
-                limit: singleKanjiConversionCandidateLimit,
-                beamWidth: conversionBeamWidth,
-                yomiSearchMode: .commonPrefix,
-                predictivePrefixLength: 1,
-                omissionPenaltyWeight: 1500
-            )
-            for candidate in kanaKanjiConverter.singleKanjiCandidates(
-                targetText,
-                options: singleKanjiOptions,
-                limit: singleKanjiConversionCandidateLimit
-            ) {
-                appendUnique(candidate.text)
+            for candidate in singleKanjiCandidates {
+                appendUnique(candidate.text, source: .singleKanji)
             }
         } else {
             for candidate in fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
                 .sorted(by: scoredCandidateSort) {
-                appendUnique(candidate.item.text, consumedReadingLength: candidate.item.consumedReadingLength)
+                appendUnique(
+                    candidate.item.text,
+                    consumedReadingLength: candidate.item.consumedReadingLength,
+                    source: candidate.item.source
+                )
             }
         }
 
@@ -5388,7 +5472,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 .sorted(by: scoredCandidateSort)
                 .map(\.item))
         case .english, .number:
-            return [ConversionCandidateItem(text: targetText, consumedReadingLength: targetText.count)]
+            return [ConversionCandidateItem(
+                text: targetText,
+                consumedReadingLength: targetText.count,
+                source: language == .english ? .fallback : .direct
+            )]
         }
     }
 
@@ -5398,15 +5486,27 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     ) -> [ScoredConversionCandidateItem] {
         [
             ScoredConversionCandidateItem(
-                item: ConversionCandidateItem(text: targetText, consumedReadingLength: targetText.count),
+                item: ConversionCandidateItem(
+                    text: targetText,
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
                 score: baseScore
             ),
             ScoredConversionCandidateItem(
-                item: ConversionCandidateItem(text: katakanaText(from: targetText), consumedReadingLength: targetText.count),
+                item: ConversionCandidateItem(
+                    text: katakanaText(from: targetText),
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
                 score: baseScore + 100
             ),
             ScoredConversionCandidateItem(
-                item: ConversionCandidateItem(text: halfWidthKatakanaText(from: targetText), consumedReadingLength: targetText.count),
+                item: ConversionCandidateItem(
+                    text: halfWidthKatakanaText(from: targetText),
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
                 score: baseScore + 200
             )
         ]
