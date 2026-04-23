@@ -5410,10 +5410,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 predictivePrefixLength: 1,
                 omissionPenaltyWeight: 1500
             )
-            let fallbackTexts = Set(fallbackScoredCandidates(
-                for: targetText,
-                baseScore: mainOptions.unknownWordCost
-            ).map(\.item.text))
             let singleKanjiOptions = ConversionOptions(
                 limit: singleKanjiConversionCandidateLimit,
                 beamWidth: conversionBeamWidth,
@@ -5426,13 +5422,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 options: singleKanjiOptions,
                 limit: singleKanjiConversionCandidateLimit
             )
-            let singleKanjiTexts = Set(singleKanjiCandidates.map(\.text))
 
             for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
-                guard fallbackTexts.contains(candidate.text) == false,
-                      singleKanjiTexts.contains(candidate.text) == false else {
-                    continue
-                }
                 appendUnique(candidate.text, source: .main)
             }
 
@@ -5451,9 +5442,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 options: auxiliaryOptions,
                 limit: auxiliaryConversionCandidateLimit
             ) {
-                guard singleKanjiTexts.contains(candidate.text) == false else {
-                    continue
-                }
                 auxiliaryCandidates.append(
                     ScoredConversionCandidateItem(
                         item: ConversionCandidateItem(

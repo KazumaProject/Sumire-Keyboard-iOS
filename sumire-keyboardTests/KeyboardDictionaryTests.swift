@@ -2,6 +2,50 @@ import Foundation
 import Testing
 
 struct KeyboardDictionaryTests {
+    @Test func auxiliaryCandidatesPreferLowerScoreForDuplicateTextAcrossSources() {
+        let mainDictionary = MozcDictionary(entries: [
+            DictionaryEntry(yomi: "あ", leftId: 0, rightId: 0, cost: 900, surface: "重複候補")
+        ])
+        let emojiDictionary = MozcDictionary(entries: [
+            DictionaryEntry(yomi: "あい", leftId: 0, rightId: 0, cost: 100, surface: "重複候補")
+        ])
+        let converter = KanaKanjiConverter(
+            dictionarySet: LoadedDictionarySet(
+                main: mainDictionary,
+                supplementals: SupplementalDictionaryStore([.emoji: emojiDictionary])
+            )
+        )
+
+        let candidates = converter.auxiliaryCandidates(
+            "あい",
+            options: ConversionOptions(yomiSearchMode: .commonPrefixPlusPredictive),
+            limit: 10
+        )
+
+        let duplicate = candidates.first { $0.text == "重複候補" }
+        #expect(duplicate?.score == 100)
+    }
+
+    @Test func commonWordsHaveExpectedTopCandidatesAndScores() throws {
+        let converter = try Self.makeArtifactBackedConverter()
+
+        let watashiCandidates = converter.convert(
+            "わたし",
+            options: ConversionOptions(limit: 20, beamWidth: 50, yomiSearchMode: .commonPrefixPlusOmission)
+        )
+        let watashiTop = try #require(watashiCandidates.first)
+        #expect(watashiTop.text == "私", "expected top for わたし to be 私, got \(watashiTop.text) score=\(watashiTop.score)")
+        #expect(watashiTop.score < 10_000, "expected dictionary-derived score for わたし top candidate, got \(watashiTop.score)")
+
+        let nokogiriCandidates = converter.convert(
+            "のこぎり",
+            options: ConversionOptions(limit: 20, beamWidth: 50, yomiSearchMode: .commonPrefixPlusOmission)
+        )
+        let nokogiriTop = try #require(nokogiriCandidates.first)
+        #expect(nokogiriTop.text == "ノコギリ", "expected top for のこぎり to be ノコギリ, got \(nokogiriTop.text) score=\(nokogiriTop.score)")
+        #expect(nokogiriTop.score < 10_000, "expected dictionary-derived score for のこぎり top candidate, got \(nokogiriTop.score)")
+    }
+
     @Test func singleKanjiSupplementalProducesCandidates() throws {
         let resourceDirectory = Self.repositoryRoot()
             .appendingPathComponent("sumire-keyboardKeyboard/KanaKanjiResources", isDirectory: true)
@@ -135,6 +179,38 @@ struct KeyboardDictionaryTests {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+    }
+
+    private static func makeArtifactBackedConverter() throws -> KanaKanjiConverter {
+        let resourceDirectory = repositoryRoot()
+            .appendingPathComponent("sumire-keyboardKeyboard/KanaKanjiResources", isDirectory: true)
+        let mainDirectory = resourceDirectory.appendingPathComponent("main", isDirectory: true)
+        let sharedPOSTableURL = resourceDirectory.appendingPathComponent("pos_table.bin")
+        let connectionMatrixURL = mainDirectory.appendingPathComponent(MozcDictionary.connectionMatrixFileName)
+
+        let mainDictionary = try MozcDictionary(
+            artifactsDirectory: mainDirectory,
+            sharedPOSTableURL: sharedPOSTableURL
+        )
+
+        var supplementals: [SupplementalDictionaryKind: MozcDictionary] = [:]
+        for kind in SupplementalDictionaryKind.allCases {
+            let directory = resourceDirectory.appendingPathComponent(kind.resourceDirectoryName, isDirectory: true)
+            guard MozcArtifactIO.containsDictionaryArtifacts(at: directory) else {
+                continue
+            }
+            supplementals[kind] = try MozcDictionary(
+                artifactsDirectory: directory,
+                sharedPOSTableURL: sharedPOSTableURL
+            )
+        }
+
+        let dictionarySet = LoadedDictionarySet(
+            main: mainDictionary,
+            supplementals: SupplementalDictionaryStore(supplementals)
+        )
+        let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(connectionMatrixURL)
+        return KanaKanjiConverter(dictionarySet: dictionarySet, connectionMatrix: connectionMatrix)
     }
 }
 
