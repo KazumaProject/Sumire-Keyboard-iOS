@@ -612,9 +612,21 @@ private struct DictionaryEntryEditorView: View {
                 }
 
                 Section {
-                    Stepper("score \(draft.score)", value: $draft.score, in: -100_000...100_000)
-                    Stepper("leftId \(draft.leftId)", value: $draft.leftId, in: 0...100_000)
-                    Stepper("rightId \(draft.rightId)", value: $draft.rightId, in: 0...100_000)
+                    LabeledContent("score") {
+                        TextField("score", value: $draft.score, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numbersAndPunctuation)
+                    }
+                    LabeledContent("leftId") {
+                        TextField("leftId", value: $draft.leftId, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad)
+                    }
+                    LabeledContent("rightId") {
+                        TextField("rightId", value: $draft.rightId, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad)
+                    }
                 }
             }
             .navigationTitle(title)

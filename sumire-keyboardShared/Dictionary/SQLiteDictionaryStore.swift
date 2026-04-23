@@ -306,7 +306,11 @@ final class SQLiteDictionaryStore: @unchecked Sendable {
                 SET score = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                bindings: [.int(existing.score), .double(updatedAt.timeIntervalSince1970), .text(existing.id)]
+                bindings: [
+                    .int(existing.score - 500),
+                    .double(updatedAt.timeIntervalSince1970),
+                    .text(existing.id)
+                ]
             )
         } else {
             try database.execute(

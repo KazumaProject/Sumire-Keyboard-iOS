@@ -115,6 +115,7 @@ struct DictionaryFeatureTests {
         let entries = try await learningRepository.searchExact(reading: "すみれ", limit: 10)
         #expect(entries.count == 1)
         #expect(entries.first?.word == "菫")
+        #expect(entries.first?.score == -490)
     }
 
     @Test func learningRepositoryResolvesMissingLexicalInfoToDefaultGeneralNoun() async throws {
