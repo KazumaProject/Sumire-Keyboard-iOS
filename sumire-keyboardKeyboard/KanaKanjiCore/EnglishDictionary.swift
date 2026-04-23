@@ -137,6 +137,9 @@ struct EnglishEngine: Sendable {
         let score: Int
     }
 
+    private static let defaultPredictionLimit = 12
+    private static let shortInputPredictionLimit = 6
+
     private let dictionary: EnglishDictionary
 
     init(dictionary: EnglishDictionary) {
@@ -148,28 +151,108 @@ struct EnglishEngine: Sendable {
             return []
         }
 
-        let hits = dictionary.reading.predictiveSearchTermIds(Array(input.lowercased().utf16))
-        var candidates: [Candidate] = []
-        candidates.reserveCapacity(hits.count * 2)
+        let lowercasedInput = input.lowercased()
+        let inputCodeUnits = Array(lowercasedInput.utf16)
+        let predictionLimit = input.count <= 2
+            ? Self.shortInputPredictionLimit
+            : Self.defaultPredictionLimit
+
+        let hits = dictionary.reading.predictiveSearchTermIds(
+            inputCodeUnits,
+            matching: inputCodeUnits,
+            limit: predictionLimit,
+            maxYomiLength: nil
+        )
+        let hasDictionaryPrediction = hits.isEmpty == false
+
+        var candidates = defaultInputCandidates(for: input)
+        if hasDictionaryPrediction == false {
+            return Self.deduplicatedAndSorted(candidates)
+        }
 
         for (reading, termId) in hits {
             for token in dictionary.tokens.tokens(forTermId: termId) {
-                let word = token.nodeId == -1
+                let baseWord = token.nodeId == -1
                     ? reading
                     : dictionary.word.getLetter(nodeIndex: Int(token.nodeId))
+
+                guard baseWord.isEmpty == false else {
+                    continue
+                }
+
+                let normalizedWordCost = max(Int(token.wordCost), 0)
+                let baseScore = 1_000 + normalizedWordCost
+                candidates.append(Candidate(reading: reading, word: baseWord, score: baseScore))
                 candidates.append(Candidate(
                     reading: reading,
-                    word: word,
-                    score: Int(token.wordCost)
+                    word: Self.capitalizeFirstCharacter(in: baseWord),
+                    score: baseScore + 100
+                ))
+                candidates.append(Candidate(
+                    reading: reading,
+                    word: baseWord.uppercased(),
+                    score: baseScore + 200
                 ))
             }
         }
 
-        return candidates.sorted {
+        return Self.deduplicatedAndSorted(candidates)
+    }
+
+    func fallbackCandidates(input: String) -> [Candidate] {
+        Self.fallbackPrediction(input: input)
+    }
+
+    static func fallbackPrediction(input: String) -> [Candidate] {
+        guard input.isEmpty == false else {
+            return []
+        }
+
+        let fallbackCandidates = [
+            Candidate(reading: input, word: input, score: 0),
+            Candidate(reading: input, word: capitalizeFirstCharacter(in: input), score: 1),
+            Candidate(reading: input, word: input.uppercased(), score: 2)
+        ]
+
+        return deduplicatedAndSorted(fallbackCandidates)
+    }
+
+    private func defaultInputCandidates(for input: String) -> [Candidate] {
+        Self.fallbackPrediction(input: input)
+    }
+
+    private static func deduplicatedAndSorted(_ candidates: [Candidate]) -> [Candidate] {
+        let deduplicated = Dictionary(grouping: candidates, by: \.word)
+            .compactMap { _, group in
+                group.min {
+                    if $0.score != $1.score {
+                        return $0.score < $1.score
+                    }
+                    return $0.word < $1.word
+                }
+            }
+
+        return deduplicated.sorted {
             if $0.score != $1.score {
                 return $0.score < $1.score
             }
             return $0.word < $1.word
         }
+    }
+
+    private static func capitalizeFirstCharacter(in value: String) -> String {
+        value.replaceFirstCharacter { $0.uppercased() }
+    }
+}
+
+private extension String {
+    func replaceFirstCharacter(_ transform: (Character) -> String) -> String {
+        guard let first else {
+            return self
+        }
+
+        var output = String(self)
+        output.replaceSubrange(startIndex...startIndex, with: transform(first))
+        return output
     }
 }

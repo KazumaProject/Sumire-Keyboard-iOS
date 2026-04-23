@@ -48,11 +48,22 @@ struct KanaKanjiBundleResources {
 
     func englishArtifactsDirectory() -> URL? {
         guard let resourcesDirectory = resourcesDirectory() else {
+            NSLog("English artifacts lookup skipped: KanaKanjiResources directory is unavailable.")
             return nil
         }
 
         let directory = resourcesDirectory.appendingPathComponent("english", isDirectory: true)
-        return EnglishArtifactIO.containsArtifacts(at: directory) ? directory : nil
+        guard isDirectory(directory) else {
+            NSLog("English artifacts directory not found at %@", directory.path)
+            return nil
+        }
+
+        guard EnglishArtifactIO.containsArtifacts(at: directory) else {
+            NSLog("English artifacts are incomplete at %@", directory.path)
+            return nil
+        }
+
+        return directory
     }
 
     func connectionMatrixURL(forMainArtifactsDirectory mainArtifactsDirectory: URL) -> URL? {

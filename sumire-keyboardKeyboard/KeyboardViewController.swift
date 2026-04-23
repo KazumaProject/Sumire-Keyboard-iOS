@@ -1291,6 +1291,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private weak var activeKanaButton: KeyboardButton?
     private weak var activeKanaTouch: UITouch?
     private weak var spaceButton: KeyboardButton?
+    private weak var enterButton: KeyboardButton?
     private weak var activeQWERTYButton: KeyboardButton?
     private weak var activeQWERTYTouch: UITouch?
     private var qwertyButtons: [KeyboardButton] = []
@@ -2100,6 +2101,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         reverseCycleButton = nil
         modeSwitchButton = nil
         spaceButton = nil
+        enterButton = nil
         clearActiveKanaButton()
         clearActiveQWERTYButton()
         suppressedReleaseTouchIDs.removeAll()
@@ -2131,6 +2133,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         updateModeSwitchButtonTitle()
         updateReverseCycleButtonState()
         updateSpaceButtonTitle()
+        updateEnterButtonAppearance()
     }
 
     private func rebuildMainKeyboardPanel() {
@@ -3115,6 +3118,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         buttons.append(spaceButton)
 
         let enterButton = KeyboardButton(title: "Enter", action: .enter, style: .primary)
+        self.enterButton = enterButton
         configureInputTargets(for: enterButton)
         let enterLongPress = UILongPressGestureRecognizer(target: self, action: #selector(handleEnterLongPress(_:)))
         enterLongPress.minimumPressDuration = 0.45
@@ -3864,6 +3868,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private func updatePreedit() {
         normalizeCompositionRanges()
         updateSpaceButtonTitle()
+        updateEnterButtonAppearance()
         updatePreeditReadingPreview()
 
         if mainKeyboardContentMode == .candidateList,
@@ -4008,6 +4013,43 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
     private func updateSpaceButtonTitle() {
         spaceButton?.updateTitle(canUseSpaceAsConversionKey ? "変換" : "空白")
+    }
+
+    /// PreEdit（composingText）がある場合は既存の「Enter」（確定）表示を維持する。
+    /// PreEdit が空のときだけ、入力欄の returnKeyType に応じてEnterキーの見た目を切り替える。
+    /// - 既存の handleEnterKey / handleEnterLongPress / 変換フローには一切触れない。
+    private func updateEnterButtonAppearance() {
+        guard composingText.isEmpty else {
+            // PreEdit あり → 確定用の既存表示「Enter」に戻す（PreEdit が空→非空になったときのリセット）
+            enterButton?.updateTitle("Enter")
+            return
+        }
+        // PreEdit なし → returnKeyType に応じて表示切り替え
+        // third-party keyboard 制約でアクセス不能なケースでも .default として扱われるため安全
+        let returnKeyType = textDocumentProxy.returnKeyType
+        switch returnKeyType {
+        case .send:
+            enterButton?.updateTitle("送信")
+        case .search:
+            enterButton?.updateSystemImage("magnifyingglass")
+        case .go:
+            enterButton?.updateTitle("移動")
+        case .next:
+            enterButton?.updateTitle("次へ")
+        case .done:
+            enterButton?.updateTitle("完了")
+        case .join:
+            enterButton?.updateTitle("参加")
+        case .route:
+            enterButton?.updateTitle("経路")
+        case .emergencyCall:
+            enterButton?.updateTitle("発信")
+        case .continue:
+            enterButton?.updateTitle("続ける")
+        default:
+            // .default / .newline / .google / .yahoo / @unknown → 改行アイコン
+            enterButton?.updateSystemImage("return")
+        }
     }
 
     private var canUseSpaceAsConversionKey: Bool {
