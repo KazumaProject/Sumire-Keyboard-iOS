@@ -61,6 +61,7 @@ struct ContentView: View {
                 keyboardListSection
                 japaneseFlickSection
                 conversionSection
+                dictionaryManagementSection
                 sharedSettingsSection
             }
             .navigationTitle("Sumire Keyboard")
@@ -156,6 +157,16 @@ struct ContentView: View {
             LabeledContent("現在の Space") {
                 Text(usesHalfWidthSpace ? "半角" : "全角")
                     .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var dictionaryManagementSection: some View {
+        Section("辞書") {
+            NavigationLink {
+                DictionaryManagementView()
+            } label: {
+                Label("辞書管理", systemImage: "books.vertical")
             }
         }
     }
