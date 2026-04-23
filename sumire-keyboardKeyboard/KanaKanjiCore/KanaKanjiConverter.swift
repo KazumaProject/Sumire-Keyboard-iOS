@@ -1,6 +1,13 @@
 import Foundation
 
 public struct KanaKanjiConverter: Sendable {
+    public enum DictionaryScope: Sendable {
+        case main
+        case auxiliary
+        case auxiliarySupplementals
+        case singleKanji
+    }
+
     private final class Node {
         let leftId: Int
         let rightId: Int
@@ -123,11 +130,32 @@ public struct KanaKanjiConverter: Sendable {
         }
     }
 
-    private let dictionary: MozcDictionary
+    private let mainDictionary: CompositeMozcDictionary
+    private let auxiliaryDictionary: CompositeMozcDictionary
+    private let auxiliarySupplementalDictionary: CompositeMozcDictionary
+    private let singleKanjiDictionary: CompositeMozcDictionary
     private let connectionMatrix: ConnectionMatrix?
 
     public init(dictionary: MozcDictionary, connectionMatrix: ConnectionMatrix? = nil) {
-        self.dictionary = dictionary
+        let mainDictionary = CompositeMozcDictionary(main: dictionary)
+        self.mainDictionary = mainDictionary
+        self.auxiliaryDictionary = mainDictionary
+        self.auxiliarySupplementalDictionary = CompositeMozcDictionary(dictionaries: [])
+        self.singleKanjiDictionary = CompositeMozcDictionary(dictionaries: [])
+        self.connectionMatrix = connectionMatrix
+    }
+
+    public init(dictionarySet: LoadedDictionarySet, connectionMatrix: ConnectionMatrix? = nil) {
+        self.mainDictionary = CompositeMozcDictionary(dictionaries: [dictionarySet.main])
+        self.auxiliaryDictionary = CompositeMozcDictionary(
+            dictionaries: [dictionarySet.main] + dictionarySet.supplementals.orderedDictionaries(excluding: [.singleKanji])
+        )
+        self.auxiliarySupplementalDictionary = CompositeMozcDictionary(
+            dictionaries: dictionarySet.supplementals.orderedDictionaries(excluding: [.singleKanji])
+        )
+        self.singleKanjiDictionary = CompositeMozcDictionary(
+            dictionaries: dictionarySet.supplementals.dictionary(for: .singleKanji).map { [$0] } ?? []
+        )
         self.connectionMatrix = connectionMatrix
     }
 
@@ -139,7 +167,7 @@ public struct KanaKanjiConverter: Sendable {
             return []
         }
 
-        var graph = constructGraph(input, options: options)
+        var graph = constructGraph(input, options: options, dictionary: mainDictionary)
         return backwardAStar(
             graph: &graph,
             length: Array(input).count,
@@ -151,12 +179,18 @@ public struct KanaKanjiConverter: Sendable {
     public func predict(
         _ input: String,
         options: ConversionOptions = ConversionOptions(),
-        limit: Int = 50
+        limit: Int = 50,
+        scope: DictionaryScope = .auxiliary
     ) -> [ConversionCandidate] {
         let inputLength = input.count
         guard inputLength >= 3,
               options.yomiSearchMode.includesPredictive,
               limit > 0 else {
+            return []
+        }
+
+        let dictionary = dictionary(for: scope)
+        guard dictionary.isEmpty == false else {
             return []
         }
 
@@ -202,9 +236,107 @@ public struct KanaKanjiConverter: Sendable {
     public func commonPrefixCandidates(
         _ input: String,
         options: ConversionOptions = ConversionOptions(),
-        limit: Int = 50
+        limit: Int = 50,
+        scope: DictionaryScope = .auxiliary
     ) -> [ConversionCandidate] {
         guard input.count > 1, limit > 0 else {
+            return []
+        }
+
+        return prefixCandidates(
+            input,
+            options: options,
+            limit: limit,
+            scope: scope,
+            includePartialMatches: true,
+            includeFullMatches: false
+        )
+    }
+
+    public func auxiliaryCandidates(
+        _ input: String,
+        options: ConversionOptions = ConversionOptions(),
+        limit: Int = 50
+    ) -> [ConversionCandidate] {
+        guard input.isEmpty == false, limit > 0 else {
+            return []
+        }
+
+        var bestByText: [String: ConversionCandidate] = [:]
+        bestByText.reserveCapacity(limit)
+
+        func add(_ candidate: ConversionCandidate) {
+            if let current = bestByText[candidate.text] {
+                if candidate.score < current.score {
+                    bestByText[candidate.text] = candidate
+                }
+            } else {
+                bestByText[candidate.text] = candidate
+            }
+        }
+
+        for candidate in prefixCandidates(
+            input,
+            options: options,
+            limit: limit,
+            scope: .auxiliary,
+            includePartialMatches: true,
+            includeFullMatches: false
+        ) {
+            add(candidate)
+        }
+
+        for candidate in prefixCandidates(
+            input,
+            options: options,
+            limit: limit,
+            scope: .auxiliarySupplementals,
+            includePartialMatches: false,
+            includeFullMatches: true
+        ) {
+            add(candidate)
+        }
+
+        for candidate in predict(input, options: options, limit: limit, scope: .auxiliary) {
+            add(candidate)
+        }
+
+        return sortedCandidatesByScore(bestByText.values).prefix(limit).map { $0 }
+    }
+
+    public func singleKanjiCandidates(
+        _ input: String,
+        options: ConversionOptions = ConversionOptions(),
+        limit: Int = 100
+    ) -> [ConversionCandidate] {
+        guard input.isEmpty == false, limit > 0 else {
+            return []
+        }
+
+        return prefixCandidates(
+            input,
+            options: options,
+            limit: limit,
+            scope: .singleKanji,
+            includePartialMatches: false,
+            includeFullMatches: true
+        )
+    }
+
+    private func prefixCandidates(
+        _ input: String,
+        options: ConversionOptions,
+        limit: Int,
+        scope: DictionaryScope,
+        includePartialMatches: Bool,
+        includeFullMatches: Bool
+    ) -> [ConversionCandidate] {
+        guard input.isEmpty == false, limit > 0 else {
+            return []
+        }
+
+        let dictionary = dictionary(for: scope)
+        guard dictionary.isEmpty == false else {
             return []
         }
 
@@ -219,14 +351,19 @@ public struct KanaKanjiConverter: Sendable {
         var bestByText: [String: ConversionCandidate] = [:]
         bestByText.reserveCapacity(limit)
 
-        for match in matches where match.length < characters.count {
+        for match in matches {
+            let isFullMatch = match.length == characters.count
+            guard (isFullMatch && includeFullMatches) || (!isFullMatch && includePartialMatches) else {
+                continue
+            }
+
             let penaltyCost = match.penalty * options.omissionPenaltyWeight
             for entry in match.entries {
                 let candidate = ConversionCandidate(
                     text: entry.surface,
                     reading: entry.yomi,
                     score: entry.cost + penaltyCost,
-                    consumedLength: match.length
+                    consumedLength: isFullMatch ? nil : match.length
                 )
 
                 if let current = bestByText[entry.surface] {
@@ -239,7 +376,27 @@ public struct KanaKanjiConverter: Sendable {
             }
         }
 
-        return bestByText.values.sorted {
+        return sortedCandidates(bestByText.values).prefix(limit).map { $0 }
+    }
+
+    private func sortedCandidates(_ candidates: Dictionary<String, ConversionCandidate>.Values) -> [ConversionCandidate] {
+        sortedCandidates(Array(candidates))
+    }
+
+    private func sortedCandidatesByScore(_ candidates: Dictionary<String, ConversionCandidate>.Values) -> [ConversionCandidate] {
+        Array(candidates).sorted {
+            if $0.score != $1.score {
+                return $0.score < $1.score
+            }
+            if $0.reading.count != $1.reading.count {
+                return $0.reading.count > $1.reading.count
+            }
+            return $0.text < $1.text
+        }
+    }
+
+    private func sortedCandidates(_ candidates: [ConversionCandidate]) -> [ConversionCandidate] {
+        candidates.sorted {
             if $0.reading.count != $1.reading.count {
                 return $0.reading.count > $1.reading.count
             }
@@ -247,7 +404,7 @@ public struct KanaKanjiConverter: Sendable {
                 return $0.score < $1.score
             }
             return $0.text < $1.text
-        }.prefix(limit).map { $0 }
+        }
     }
 
     private func predictiveMaxYomiLength(forInputLength inputLength: Int) -> Int? {
@@ -256,7 +413,8 @@ public struct KanaKanjiConverter: Sendable {
 
     private func constructGraph(
         _ input: String,
-        options: ConversionOptions
+        options: ConversionOptions,
+        dictionary: CompositeMozcDictionary
     ) -> [[Node]] {
         let characters = Array(input)
         let length = characters.count
@@ -363,7 +521,7 @@ public struct KanaKanjiConverter: Sendable {
                 node.forwardCost = best
             }
 
-            if index <= length, beamWidth > 0, graph[index].count > beamWidth {
+            if index < length, beamWidth > 0, graph[index].count > beamWidth {
                 graph[index].sort { $0.forwardCost < $1.forwardCost }
                 graph[index].removeSubrange(beamWidth..<graph[index].count)
             }
@@ -543,6 +701,19 @@ public struct KanaKanjiConverter: Sendable {
     private func containsDigit(_ value: String) -> Bool {
         value.unicodeScalars.contains {
             ("0"..."9").contains(Character($0)) || (0xFF10...0xFF19).contains(Int($0.value))
+        }
+    }
+
+    private func dictionary(for scope: DictionaryScope) -> CompositeMozcDictionary {
+        switch scope {
+        case .main:
+            return mainDictionary
+        case .auxiliary:
+            return auxiliaryDictionary
+        case .auxiliarySupplementals:
+            return auxiliarySupplementalDictionary
+        case .singleKanji:
+            return singleKanjiDictionary
         }
     }
 }

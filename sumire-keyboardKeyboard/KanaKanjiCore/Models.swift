@@ -92,6 +92,7 @@ public enum KanaKanjiError: Error, LocalizedError {
     case noDictionaryEntries(URL)
     case invalidDictionaryLine(file: URL, line: Int, text: String)
     case invalidInteger(field: String, value: String, file: URL, line: Int)
+    case posTableNotFound(artifactsDirectory: URL, sharedPOSTableURL: URL?)
     case connectionMatrixIsEmpty(URL)
     case connectionMatrixIsNotSquare(URL, count: Int)
 
@@ -105,6 +106,11 @@ public enum KanaKanjiError: Error, LocalizedError {
             return "Invalid Mozc dictionary line at \(file.path):\(line): \(text)"
         case .invalidInteger(let field, let value, let file, let line):
             return "Invalid integer for \(field) at \(file.path):\(line): \(value)"
+        case .posTableNotFound(let artifactsDirectory, let sharedPOSTableURL):
+            if let sharedPOSTableURL {
+                return "POS table was not found at \(artifactsDirectory.appendingPathComponent("pos_table.bin").path) or shared POS table \(sharedPOSTableURL.path)"
+            }
+            return "POS table was not found at \(artifactsDirectory.appendingPathComponent("pos_table.bin").path)"
         case .connectionMatrixIsEmpty(let url):
             return "Connection matrix is empty: \(url.path)"
         case .connectionMatrixIsNotSquare(let url, let count):

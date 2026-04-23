@@ -78,7 +78,17 @@
 		};
 		B10000000000000000000005 /* sumire-keyboardKeyboard */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+				KanaKanjiResources,
+			);
 			path = "sumire-keyboardKeyboard";
+			sourceTree = "<group>";
+		};
+		C10000000000000000000001 /* KanaKanjiCore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "sumire-keyboardKeyboard/KanaKanjiCore";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -122,6 +132,7 @@
 				C00000000000000000000001 /* sumire-keyboardShared */,
 				B10000000000000000000005 /* sumire-keyboardKeyboard */,
 				A4EBDFB42F93627000764A31 /* sumire-keyboardTests */,
+				C10000000000000000000001 /* KanaKanjiCore */,
 				A4EBDFBE2F93627000764A31 /* sumire-keyboardUITests */,
 				A4EBDFA52F93626E00764A31 /* Products */,
 			);
@@ -181,6 +192,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A4EBDFB42F93627000764A31 /* sumire-keyboardTests */,
+				C10000000000000000000001 /* KanaKanjiCore */,
 			);
 			name = "sumire-keyboardTests";
 			packageProductDependencies = (

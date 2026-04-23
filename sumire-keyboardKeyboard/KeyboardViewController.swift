@@ -62,9 +62,43 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let candidates: [String]
     }
 
-    private struct ConversionCandidateItem: Equatable {
+    private enum ConversionCandidateSource: Hashable, Sendable {
+        case main
+        case auxiliary
+        case fallback
+        case singleKanji
+        case english
+        case direct
+    }
+
+    private struct ConversionCandidateItem: Hashable, Sendable {
         let text: String
         let consumedReadingLength: Int
+        let source: ConversionCandidateSource
+    }
+
+    private struct CandidateButtonConfiguration: Hashable {
+        let title: String
+        let committedCandidate: ConversionCandidateItem?
+        let isEnabled: Bool
+        let isSelected: Bool
+    }
+
+    private enum CandidateBarSection: Hashable {
+        case main
+    }
+
+    private struct ScoredConversionCandidateItem: Sendable {
+        let item: ConversionCandidateItem
+        let score: Int
+    }
+
+    private struct ConversionCandidateLookupKey: Equatable, Sendable {
+        let targetText: String
+        let language: PrecompositionLanguage
+        let omissionSearchEnabled: Bool
+        let hasKanaKanjiConverter: Bool
+        let hasEnglishEngine: Bool
     }
 
     private enum KeyAction {
@@ -95,7 +129,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case precomposition(PrecompositionStatus)
     }
 
-    private enum PrecompositionLanguage: String, Equatable {
+    private enum PrecompositionLanguage: String, Equatable, Sendable {
         case japanese
         case english
         case number
@@ -400,73 +434,77 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private final class CandidateButton: UIButton {
-        var committedCandidate: ConversionCandidateItem?
+    private final class CandidateBarCell: UICollectionViewCell {
+        static let reuseIdentifier = "CandidateBarCell"
+        private static let minimumWidth: CGFloat = 72
+        private static let maximumWidth: CGFloat = 220
+        private static let cellHeight: CGFloat = 32
 
-        init() {
-            super.init(frame: .zero)
+        private let titleLabel = UILabel()
 
-            var configuration = UIButton.Configuration.filled()
-            configuration.title = "候補"
-            configuration.baseBackgroundColor = KeyboardTheme.candidateBackground
-            configuration.baseForegroundColor = .label
-            configuration.cornerStyle = .medium
-            configuration.titleLineBreakMode = .byTruncatingTail
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8)
-            self.configuration = configuration
-            titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
-            titleLabel?.adjustsFontSizeToFitWidth = true
-            titleLabel?.minimumScaleFactor = 0.72
-            titleLabel?.numberOfLines = 1
-            titleLabel?.lineBreakMode = .byTruncatingTail
-            setContentHuggingPriority(.required, for: .horizontal)
-            setContentCompressionResistancePriority(.required, for: .horizontal)
-            layer.cornerRadius = 8
-            layer.borderWidth = 0
-            layer.borderColor = UIColor.clear.cgColor
-            translatesAutoresizingMaskIntoConstraints = false
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+
+            contentView.backgroundColor = KeyboardTheme.candidateBackground
+            contentView.layer.cornerRadius = 8
+            contentView.layer.masksToBounds = true
+            contentView.layer.borderWidth = 0
+            contentView.layer.borderColor = UIColor.clear.cgColor
+
+            titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+            titleLabel.textColor = .label
+            titleLabel.numberOfLines = 1
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.adjustsFontSizeToFitWidth = true
+            titleLabel.minimumScaleFactor = 0.72
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            contentView.addSubview(titleLabel)
+
+            NSLayoutConstraint.activate([
+                titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 1),
+                titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+                titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -8),
+                titleLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -1),
+                contentView.heightAnchor.constraint(equalToConstant: Self.cellHeight),
+                contentView.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumWidth),
+                titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.maximumWidth)
+            ])
         }
 
         required init?(coder: NSCoder) {
             return nil
         }
 
-        override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
-            super.traitCollectionDidChange(previousTraitCollection)
-            updateColorsForCurrentTraits()
+        override func prepareForReuse() {
+            super.prepareForReuse()
+            titleLabel.text = nil
+            configure(title: "候補", isEnabled: false, isSelected: false)
         }
 
-        func configure(
-            title: String,
-            committedCandidate: ConversionCandidateItem?,
-            isEnabled: Bool,
-            isSelected: Bool = false
-        ) {
-            self.committedCandidate = committedCandidate
-            self.isEnabled = isEnabled
-            self.isSelected = isSelected
-            alpha = isEnabled ? 1 : 0.55
+        override func preferredLayoutAttributesFitting(
+            _ layoutAttributes: UICollectionViewLayoutAttributes
+        ) -> UICollectionViewLayoutAttributes {
+            setNeedsLayout()
+            layoutIfNeeded()
 
-            var newConfiguration = self.configuration
-            newConfiguration?.title = title
-            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
-            newConfiguration?.titleLineBreakMode = .byTruncatingTail
-            self.configuration = newConfiguration
-            titleLabel?.numberOfLines = 1
-            titleLabel?.lineBreakMode = .byTruncatingTail
-            updateColorsForCurrentTraits()
+            let fittingSize = contentView.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let attributes = layoutAttributes.copy() as? UICollectionViewLayoutAttributes ?? layoutAttributes
+            attributes.frame.size = CGSize(
+                width: max(Self.minimumWidth, ceil(fittingSize.width)),
+                height: Self.cellHeight
+            )
+            return attributes
         }
 
-        private func updateColorsForCurrentTraits() {
-            var newConfiguration = self.configuration
-            newConfiguration?.baseBackgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
-            newConfiguration?.baseForegroundColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
-            self.configuration = newConfiguration
-            layer.borderWidth = isSelected ? 0.5 : 0
-            layer.borderColor = isSelected
+        func configure(title: String, isEnabled: Bool, isSelected: Bool) {
+            titleLabel.text = title
+            titleLabel.textColor = isSelected ? .white : (isEnabled ? .label : .secondaryLabel)
+            contentView.backgroundColor = isSelected ? .systemBlue : KeyboardTheme.candidateBackground
+            contentView.layer.borderWidth = isSelected ? 0.5 : 0
+            contentView.layer.borderColor = isSelected
                 ? UIColor.systemBlue.resolvedColor(with: traitCollection).cgColor
                 : UIColor.clear.cgColor
+            alpha = isEnabled ? 1 : 0.55
         }
     }
 
@@ -1188,15 +1226,20 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var conversionRange: Range<Int> = 0..<0
     private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
+    private var englishEngine: EnglishEngine?
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
-    private var candidateButtons: [CandidateButton] = []
+    private var isLoadingEnglishDictionary = false
+    private var conversionCandidateLookupGeneration = 0
+    private var conversionCandidateLookupKey: ConversionCandidateLookupKey?
+    private var conversionCandidateLookupInFlightKey: ConversionCandidateLookupKey?
+    private var conversionCandidateLookupResults: [ConversionCandidateItem] = []
     private var candidateListCandidates: [ConversionCandidateItem] = []
     private var candidateListSelectedCandidateIndex: Int?
+    private var candidateBarDataSource: UICollectionViewDiffableDataSource<CandidateBarSection, CandidateButtonConfiguration>?
     private let preeditReadingView = PreeditReadingView()
     private let candidateRowContainer = UIStackView()
-    private let candidateScrollView = UIScrollView()
-    private let candidateStack = UIStackView()
+    private lazy var candidateBarCollectionView = makeCandidateBarCollectionView()
     private let candidateToggleContainer = UIView()
     private let candidateListToggleButton = UIButton(type: .system)
     private let emptyPreeditToolbar = UIStackView()
@@ -1226,6 +1269,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     )
     private var keyboardLayoutConstraints: [NSLayoutConstraint] = []
     private let conversionCandidateLimit = 10
+    private let auxiliaryConversionCandidateLimit = 100
+    private let singleKanjiConversionCandidateLimit = 200
     private let conversionBeamWidth = 20
     private let keyboardHorizontalInset = CGFloat(KeyboardSettings.defaultKeyboardLeadingOffset)
     private let keyboardBaseHeight = CGFloat(KeyboardSettings.defaultKeyboardHeight)
@@ -1235,6 +1280,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private let keyboardMaximumHeight: CGFloat = 520
     private let keyboardBottomMarginStep: CGFloat = 4
     private let keyboardMaximumBottomMargin: CGFloat = 80
+    private let candidateBarDefaultHeight: CGFloat = 38
+    private let candidateBarExpandedHeight: CGFloat = 56
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private static let hostDeletionDelimiters = Set<Character>([
@@ -1258,6 +1305,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private var keyboardHeightConstraint: NSLayoutConstraint?
+    private var candidateBarHeightConstraint: NSLayoutConstraint?
     private var contentLeadingConstraint: NSLayoutConstraint?
     private var contentTrailingConstraint: NSLayoutConstraint?
     private var contentBottomConstraint: NSLayoutConstraint?
@@ -1271,6 +1319,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var resizePanStartState: ResizePanStartState?
     private weak var resizeOverlayView: UIView?
     private static var cachedKanaKanjiConverter: KanaKanjiConverter?
+    private static var cachedEnglishEngine: EnglishEngine?
 
     override func loadView() {
         let inputView = UIInputView(frame: .zero, inputViewStyle: .keyboard)
@@ -1295,7 +1344,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         view.backgroundColor = KeyboardTheme.keyboardBackground
         flickGuideView.setNeedsLayout()
         updatePreeditReadingPreview()
-        candidateButtons.forEach { $0.setNeedsLayout() }
+        candidateBarCollectionView.visibleCells.forEach { $0.setNeedsLayout() }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -1318,6 +1367,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.viewWillDisappear(animated)
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionCandidateLookupGeneration += 1
+        conversionCandidateLookupInFlightKey = nil
         stopDeleteRepeat()
         stopCursorRepeat()
         cursorMoveController.cancelTracking()
@@ -1330,10 +1381,17 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.didReceiveMemoryWarning()
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionCandidateLookupGeneration += 1
+        conversionCandidateLookupKey = nil
+        conversionCandidateLookupInFlightKey = nil
+        conversionCandidateLookupResults.removeAll()
         kanaKanjiLoadGeneration += 1
         isLoadingKanaKanjiConverter = false
+        isLoadingEnglishDictionary = false
         kanaKanjiConverter = nil
+        englishEngine = nil
         Self.cachedKanaKanjiConverter = nil
+        Self.cachedEnglishEngine = nil
         converterLoadFailureMessage = nil
         renderCurrentComposingText()
         updatePreedit()
@@ -1379,6 +1437,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         self.contentLeadingConstraint = contentLeadingConstraint
         self.contentTrailingConstraint = contentTrailingConstraint
 
+        let candidateBarHeightConstraint = candidateBar.heightAnchor.constraint(
+            equalToConstant: candidateBarDefaultHeight
+        )
+        self.candidateBarHeightConstraint = candidateBarHeightConstraint
+
         NSLayoutConstraint.activate([
             keyboardHeightConstraint,
 
@@ -1387,7 +1450,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             contentTrailingConstraint,
             contentBottomConstraint,
 
-            candidateBar.heightAnchor.constraint(equalToConstant: 38)
+            candidateBarHeightConstraint
         ])
 
         applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
@@ -1411,35 +1474,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         candidateRowContainer.spacing = 0
         candidateRowContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        candidateScrollView.showsHorizontalScrollIndicator = true
-        candidateScrollView.alwaysBounceHorizontal = true
-        candidateScrollView.backgroundColor = .clear
-        candidateScrollView.translatesAutoresizingMaskIntoConstraints = false
-
         candidateToggleContainer.backgroundColor = .clear
         candidateToggleContainer.translatesAutoresizingMaskIntoConstraints = false
 
         let toggleButton = makeCandidateListToggleButton()
         candidateToggleContainer.addSubview(toggleButton)
 
-        candidateStack.axis = .horizontal
-        candidateStack.alignment = .fill
-        candidateStack.distribution = .fill
-        candidateStack.spacing = 6
-        candidateStack.translatesAutoresizingMaskIntoConstraints = false
-        candidateScrollView.addSubview(candidateStack)
+        let candidateCollectionView = candidateBarCollectionView
         configureEmptyPreeditToolbar()
 
-        candidateRowContainer.addArrangedSubview(candidateScrollView)
+        candidateRowContainer.addArrangedSubview(candidateCollectionView)
         candidateRowContainer.addArrangedSubview(candidateToggleContainer)
 
         NSLayoutConstraint.activate([
-            candidateStack.topAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.topAnchor),
-            candidateStack.leadingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.leadingAnchor),
-            candidateStack.trailingAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.trailingAnchor),
-            candidateStack.bottomAnchor.constraint(equalTo: candidateScrollView.contentLayoutGuide.bottomAnchor),
-            candidateStack.heightAnchor.constraint(equalTo: candidateScrollView.frameLayoutGuide.heightAnchor),
-
             // Toggle 領域を Auto Layout 上で分離し、候補が右端ボタンの下へ潜り込まないようにする。
             candidateToggleContainer.widthAnchor.constraint(equalToConstant: 42),
             toggleButton.centerXAnchor.constraint(equalTo: candidateToggleContainer.centerXAnchor),
@@ -1455,6 +1502,48 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         emptyPreeditToolbar.isHidden = true
         updateCandidateListToggleAppearance()
         return candidateBar
+    }
+
+    private func makeCandidateBarCollectionView() -> UICollectionView {
+        let layout = UICollectionViewFlowLayout()
+        layout.scrollDirection = .horizontal
+        layout.estimatedItemSize = UICollectionViewFlowLayout.automaticSize
+        layout.minimumInteritemSpacing = 6
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 0)
+
+        let collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        collectionView.backgroundColor = .clear
+        collectionView.alwaysBounceHorizontal = true
+        collectionView.showsHorizontalScrollIndicator = true
+        collectionView.showsVerticalScrollIndicator = false
+        collectionView.translatesAutoresizingMaskIntoConstraints = false
+        collectionView.register(
+            CandidateBarCell.self,
+            forCellWithReuseIdentifier: CandidateBarCell.reuseIdentifier
+        )
+        collectionView.delegate = self
+
+        candidateBarDataSource = UICollectionViewDiffableDataSource<CandidateBarSection, CandidateButtonConfiguration>(
+            collectionView: collectionView
+        ) { collectionView, indexPath, configuration in
+            guard let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: CandidateBarCell.reuseIdentifier,
+                for: indexPath
+            ) as? CandidateBarCell else {
+                return UICollectionViewCell()
+            }
+
+            cell.configure(
+                title: configuration.title,
+                isEnabled: configuration.isEnabled,
+                isSelected: configuration.isSelected
+            )
+            return cell
+        }
+
+        applyCandidateButtonConfigurations([])
+        return collectionView
     }
 
     private func makeCandidateListToggleButton() -> UIButton {
@@ -1880,7 +1969,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             contentTrailingConstraint?.constant = -keyboardHorizontalInset
         }
 
-        keyboardHeightConstraint?.constant = CGFloat(sanitizedMetrics.height)
+        updateKeyboardHeightConstraintForCurrentState()
         contentBottomConstraint?.constant = -CGFloat(sanitizedMetrics.bottomMargin)
 
         if persists {
@@ -1889,6 +1978,15 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
         view.setNeedsLayout()
         view.layoutIfNeeded()
+    }
+
+    private func updateKeyboardHeightConstraintForCurrentState() {
+        let baseHeight = CGFloat(currentLayoutMetrics.height)
+        let candidateBarDelta = max(
+            0,
+            (candidateBarHeightConstraint?.constant ?? candidateBarDefaultHeight) - candidateBarDefaultHeight
+        )
+        keyboardHeightConstraint?.constant = baseHeight + candidateBarDelta
     }
 
     private func sanitizedKeyboardLayoutMetrics(
@@ -2149,13 +2247,20 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         _ collectionView: UICollectionView,
         numberOfItemsInSection section: Int
     ) -> Int {
-        candidateListCandidates.count
+        guard collectionView === candidateListCollectionView else {
+            return 0
+        }
+        return candidateListCandidates.count
     }
 
     func collectionView(
         _ collectionView: UICollectionView,
         cellForItemAt indexPath: IndexPath
     ) -> UICollectionViewCell {
+        guard collectionView === candidateListCollectionView else {
+            return UICollectionViewCell()
+        }
+
         guard let cell = collectionView.dequeueReusableCell(
             withReuseIdentifier: CandidateListCell.reuseIdentifier,
             for: indexPath
@@ -2173,6 +2278,17 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        if collectionView === candidateBarCollectionView {
+            guard let configuration = candidateBarDataSource?.itemIdentifier(for: indexPath),
+                  configuration.isEnabled,
+                  let candidate = configuration.committedCandidate else {
+                return
+            }
+
+            commitCandidateItem(candidate)
+            return
+        }
+
         guard candidateListCandidates.indices.contains(indexPath.item) else {
             return
         }
@@ -3268,14 +3384,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         handleInputModeList(from: sender, with: event)
     }
 
-    @objc private func commitCandidate(_ sender: CandidateButton) {
-        guard let candidate = sender.committedCandidate else {
-            return
-        }
-
-        commitCandidateItem(candidate)
-    }
-
     private func commitCandidateItem(_ candidate: ConversionCandidateItem) {
         resetMultiTapState()
         commitComposingText(candidate.text, consumedReadingLength: candidate.consumedReadingLength)
@@ -3774,45 +3882,56 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let selectedCandidateIndex = currentSelectedCandidateIndex(candidateCount: candidates.count)
         let showsEmptyToolbar = shouldShowEmptyPreeditToolbar
 
-        candidateButtons.removeAll()
-        for view in candidateStack.arrangedSubviews {
-            candidateStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
         updateCandidateBarMode(showsEmptyPreeditToolbar: showsEmptyToolbar)
 
         if showsEmptyToolbar {
-            candidateScrollView.setContentOffset(.zero, animated: false)
+            applyCandidateButtonConfigurations([])
+            candidateBarCollectionView.setContentOffset(.zero, animated: false)
             return
         }
 
         if mainKeyboardPanel == .emoji {
-            addCandidateButton(title: "絵文字辞書を準備中", committedCandidate: nil, isEnabled: false)
+            applyCandidateButtonConfigurations([
+                CandidateButtonConfiguration(
+                    title: "絵文字辞書を準備中",
+                    committedCandidate: nil,
+                    isEnabled: false,
+                    isSelected: false
+                )
+            ])
             return
         }
 
         guard isDirectMode == false else {
+            applyCandidateButtonConfigurations([])
             return
         }
 
         guard candidates.isEmpty == false else {
-            addCandidateButton(title: "候補", committedCandidate: nil, isEnabled: false)
+            applyCandidateButtonConfigurations([
+                CandidateButtonConfiguration(
+                    title: "候補",
+                    committedCandidate: nil,
+                    isEnabled: false,
+                    isSelected: false
+                )
+            ])
             return
         }
 
-        for (index, candidate) in candidates.enumerated() {
-            addCandidateButton(
+        applyCandidateButtonConfigurations(candidates.enumerated().map { index, candidate in
+            CandidateButtonConfiguration(
                 title: candidate.text,
                 committedCandidate: candidate,
                 isEnabled: true,
                 isSelected: index == selectedCandidateIndex
             )
-        }
+        })
 
         if let selectedCandidateIndex {
             scrollCandidateIntoView(at: selectedCandidateIndex)
         } else {
-            candidateScrollView.setContentOffset(.zero, animated: false)
+            candidateBarCollectionView.setContentOffset(.zero, animated: false)
         }
     }
 
@@ -3823,17 +3942,21 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private func updateCandidateBarMode(showsEmptyPreeditToolbar: Bool) {
         emptyPreeditToolbar.isHidden = showsEmptyPreeditToolbar == false
         candidateRowContainer.isHidden = showsEmptyPreeditToolbar
-        candidateScrollView.isHidden = showsEmptyPreeditToolbar
+        candidateBarCollectionView.isHidden = showsEmptyPreeditToolbar
         if showsEmptyPreeditToolbar {
             preeditReadingView.clear()
         }
     }
 
     private func updatePreeditReadingPreview() {
-        guard preeditReadingPreviewEnabled,
-              mainKeyboardPanel != .emoji,
-              isDirectMode == false,
-              composingText.isEmpty == false else {
+        let shouldShowPreview = preeditReadingPreviewEnabled
+            && mainKeyboardPanel != .emoji
+            && isDirectMode == false
+            && composingText.isEmpty == false
+
+        updateCandidateBarHeight(showsPreeditReadingPreview: shouldShowPreview)
+
+        guard shouldShowPreview else {
             preeditReadingView.clear()
             return
         }
@@ -3844,6 +3967,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             conversionRange: activeRange,
             nonTargetRanges: nonConversionPreeditRanges(textCount: composingText.count, conversionRange: activeRange)
         )
+    }
+
+    private func updateCandidateBarHeight(showsPreeditReadingPreview: Bool) {
+        let targetHeight = showsPreeditReadingPreview
+            ? candidateBarExpandedHeight
+            : candidateBarDefaultHeight
+        guard candidateBarHeightConstraint?.constant != targetHeight else {
+            return
+        }
+
+        candidateBarHeightConstraint?.constant = targetHeight
+        updateKeyboardHeightConstraintForCurrentState()
+        view.setNeedsLayout()
     }
 
     private func nonConversionPreeditRanges(
@@ -3885,41 +4021,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         return true
     }
 
-    private func addCandidateButton(
-        title: String,
-        committedCandidate: ConversionCandidateItem?,
-        isEnabled: Bool,
-        isSelected: Bool = false
-    ) {
-        let button = CandidateButton()
-        button.configure(
-            title: title,
-            committedCandidate: committedCandidate,
-            isEnabled: isEnabled,
-            isSelected: isSelected
-        )
-        button.addTarget(self, action: #selector(commitCandidate(_:)), for: .touchUpInside)
-        candidateStack.addArrangedSubview(button)
-        candidateButtons.append(button)
-
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
-        ])
+    private func applyCandidateButtonConfigurations(_ configurations: [CandidateButtonConfiguration]) {
+        var snapshot = NSDiffableDataSourceSnapshot<CandidateBarSection, CandidateButtonConfiguration>()
+        snapshot.appendSections([.main])
+        snapshot.appendItems(configurations, toSection: .main)
+        candidateBarDataSource?.apply(snapshot, animatingDifferences: false)
     }
 
     private func scrollCandidateIntoView(at index: Int) {
-        guard candidateButtons.indices.contains(index) else {
+        guard index >= 0,
+              index < candidateBarCollectionView.numberOfItems(inSection: 0) else {
             return
         }
 
-        let button = candidateButtons[index]
-        DispatchQueue.main.async { [weak self, weak button] in
-            guard let self, let button else {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  index < self.candidateBarCollectionView.numberOfItems(inSection: 0) else {
                 return
             }
 
-            let frame = button.convert(button.bounds, to: self.candidateScrollView)
-            self.candidateScrollView.scrollRectToVisible(frame.insetBy(dx: -8, dy: 0), animated: true)
+            self.candidateBarCollectionView.scrollToItem(
+                at: IndexPath(item: index, section: 0),
+                at: .centeredHorizontally,
+                animated: true
+            )
         }
     }
 
@@ -5140,61 +5265,299 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
 
         let targetText = conversionTargetText()
-        guard targetText.isEmpty == false else {
+        guard targetText.isEmpty == false,
+              let language = currentPrecompositionStatus?.language else {
             return []
         }
 
+        let key = ConversionCandidateLookupKey(
+            targetText: targetText,
+            language: language,
+            omissionSearchEnabled: omissionSearchEnabled,
+            hasKanaKanjiConverter: kanaKanjiConverter != nil,
+            hasEnglishEngine: englishEngine != nil
+        )
+
+        if conversionCandidateLookupKey == key {
+            return conversionCandidateLookupResults
+        }
+
+        scheduleConversionCandidateLookup(for: key)
+        return Self.immediateCandidateItems(for: targetText, language: language)
+    }
+
+    private func scheduleConversionCandidateLookup(for key: ConversionCandidateLookupKey) {
+        guard conversionCandidateLookupInFlightKey != key else {
+            return
+        }
+
+        conversionCandidateLookupGeneration += 1
+        let lookupGeneration = conversionCandidateLookupGeneration
+        conversionCandidateLookupKey = nil
+        conversionCandidateLookupResults.removeAll()
+        conversionCandidateLookupInFlightKey = key
+
+        let kanaKanjiConverter = kanaKanjiConverter
+        let englishEngine = englishEngine
+        let conversionCandidateLimit = conversionCandidateLimit
+        let auxiliaryConversionCandidateLimit = auxiliaryConversionCandidateLimit
+        let singleKanjiConversionCandidateLimit = singleKanjiConversionCandidateLimit
+        let conversionBeamWidth = conversionBeamWidth
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let candidates = Self.buildCandidateItems(
+                targetText: key.targetText,
+                language: key.language,
+                kanaKanjiConverter: kanaKanjiConverter,
+                englishEngine: englishEngine,
+                conversionCandidateLimit: conversionCandidateLimit,
+                auxiliaryConversionCandidateLimit: auxiliaryConversionCandidateLimit,
+                singleKanjiConversionCandidateLimit: singleKanjiConversionCandidateLimit,
+                conversionBeamWidth: conversionBeamWidth,
+                omissionSearchEnabled: key.omissionSearchEnabled
+            )
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.conversionCandidateLookupGeneration == lookupGeneration,
+                      self.currentConversionCandidateLookupKey() == key else {
+                    return
+                }
+
+                self.conversionCandidateLookupInFlightKey = nil
+                self.conversionCandidateLookupKey = key
+                self.conversionCandidateLookupResults = candidates
+                self.renderCurrentComposingText()
+                self.updatePreedit()
+            }
+        }
+    }
+
+    private func currentConversionCandidateLookupKey() -> ConversionCandidateLookupKey? {
+        guard isDirectMode == false,
+              composingText.isEmpty == false,
+              let language = currentPrecompositionStatus?.language else {
+            return nil
+        }
+
+        let targetText = conversionTargetText()
+        guard targetText.isEmpty == false else {
+            return nil
+        }
+
+        return ConversionCandidateLookupKey(
+            targetText: targetText,
+            language: language,
+            omissionSearchEnabled: omissionSearchEnabled,
+            hasKanaKanjiConverter: kanaKanjiConverter != nil,
+            hasEnglishEngine: englishEngine != nil
+        )
+    }
+
+    nonisolated private static func buildCandidateItems(
+        targetText: String,
+        language: PrecompositionLanguage,
+        kanaKanjiConverter: KanaKanjiConverter?,
+        englishEngine: EnglishEngine?,
+        conversionCandidateLimit: Int,
+        auxiliaryConversionCandidateLimit: Int,
+        singleKanjiConversionCandidateLimit: Int,
+        conversionBeamWidth: Int,
+        omissionSearchEnabled: Bool
+    ) -> [ConversionCandidateItem] {
         var seen = Set<String>()
         var candidates: [ConversionCandidateItem] = []
 
-        func appendUnique(_ text: String, consumedReadingLength: Int = targetText.count) {
-            guard text.isEmpty == false, seen.insert(text).inserted else {
+        func appendUnique(
+            _ text: String,
+            consumedReadingLength: Int = targetText.count,
+            source: ConversionCandidateSource
+        ) {
+            guard text.isEmpty == false,
+                  isDisplayableConversionCandidate(text),
+                  seen.insert(text).inserted else {
                 return
             }
             let consumedLength = min(max(consumedReadingLength, 0), targetText.count)
-            candidates.append(ConversionCandidateItem(text: text, consumedReadingLength: consumedLength))
+            candidates.append(ConversionCandidateItem(
+                text: text,
+                consumedReadingLength: consumedLength,
+                source: source
+            ))
         }
 
-        guard currentPrecompositionStatus?.language == .japanese else {
-            appendUnique(targetText)
+        switch language {
+        case .japanese:
+            break
+        case .english:
+            if let englishEngine {
+                for candidate in englishEngine.getPrediction(input: targetText).prefix(conversionCandidateLimit) {
+                    appendUnique(candidate.word, source: .english)
+                }
+            }
+            appendUnique(targetText, source: .fallback)
+            return candidates
+        case .number:
+            appendUnique(targetText, source: .direct)
             return candidates
         }
 
         if let kanaKanjiConverter {
-            let options = ConversionOptions(
+            let mainOptions = ConversionOptions(
                 limit: conversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: omissionSearchEnabled ? .commonPrefixPlusOmission : .commonPrefix,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
+            let singleKanjiOptions = ConversionOptions(
+                limit: singleKanjiConversionCandidateLimit,
+                beamWidth: conversionBeamWidth,
+                yomiSearchMode: .commonPrefix,
+                predictivePrefixLength: 1,
+                omissionPenaltyWeight: 1500
+            )
+            let singleKanjiCandidates = kanaKanjiConverter.singleKanjiCandidates(
+                targetText,
+                options: singleKanjiOptions,
+                limit: singleKanjiConversionCandidateLimit
+            )
+
+            for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
+                appendUnique(candidate.text, source: .main)
+            }
+
+            let auxiliaryOptions = ConversionOptions(
+                limit: auxiliaryConversionCandidateLimit,
                 beamWidth: conversionBeamWidth,
                 yomiSearchMode: omissionSearchEnabled ? .all : .commonPrefixPlusPredictive,
                 predictivePrefixLength: 1,
                 omissionPenaltyWeight: 1500
             )
-            for candidate in kanaKanjiConverter.convert(targetText, options: options) {
-                appendUnique(candidate.text)
-            }
-            for candidate in kanaKanjiConverter.commonPrefixCandidates(
+            var auxiliaryCandidates: [ScoredConversionCandidateItem] = []
+            auxiliaryCandidates.reserveCapacity(auxiliaryConversionCandidateLimit + 3)
+
+            for candidate in kanaKanjiConverter.auxiliaryCandidates(
                 targetText,
-                options: options,
-                limit: conversionCandidateLimit
+                options: auxiliaryOptions,
+                limit: auxiliaryConversionCandidateLimit
             ) {
-                appendUnique(
-                    candidate.text,
-                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count
+                auxiliaryCandidates.append(
+                    ScoredConversionCandidateItem(
+                        item: ConversionCandidateItem(
+                            text: candidate.text,
+                            consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                            source: .auxiliary
+                        ),
+                        score: candidate.score
+                    )
                 )
             }
-            for candidate in kanaKanjiConverter.predict(
-                targetText,
-                options: options,
-                limit: conversionCandidateLimit
-            ) {
-                appendUnique(candidate.text)
+
+            auxiliaryCandidates.append(contentsOf: fallbackScoredCandidates(
+                for: targetText,
+                baseScore: auxiliaryOptions.unknownWordCost
+            ))
+
+            for candidate in auxiliaryCandidates.sorted(by: scoredCandidateSort) {
+                appendUnique(
+                    candidate.item.text,
+                    consumedReadingLength: candidate.item.consumedReadingLength,
+                    source: candidate.item.source
+                )
+            }
+
+            for candidate in singleKanjiCandidates {
+                appendUnique(candidate.text, source: .singleKanji)
+            }
+        } else {
+            for candidate in fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
+                .sorted(by: scoredCandidateSort) {
+                appendUnique(
+                    candidate.item.text,
+                    consumedReadingLength: candidate.item.consumedReadingLength,
+                    source: candidate.item.source
+                )
             }
         }
 
-        appendUnique(targetText)
-        appendUnique(katakanaText(from: targetText))
-        appendUnique(halfWidthKatakanaText(from: targetText))
-
         return candidates
+    }
+
+    nonisolated private static func immediateCandidateItems(
+        for targetText: String,
+        language: PrecompositionLanguage
+    ) -> [ConversionCandidateItem] {
+        switch language {
+        case .japanese:
+            return uniqueCandidateItems(fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
+                .sorted(by: scoredCandidateSort)
+                .map(\.item))
+        case .english, .number:
+            return [ConversionCandidateItem(
+                text: targetText,
+                consumedReadingLength: targetText.count,
+                source: language == .english ? .fallback : .direct
+            )]
+        }
+    }
+
+    nonisolated private static func fallbackScoredCandidates(
+        for targetText: String,
+        baseScore: Int
+    ) -> [ScoredConversionCandidateItem] {
+        [
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(
+                    text: targetText,
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
+                score: baseScore
+            ),
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(
+                    text: katakanaText(from: targetText),
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
+                score: baseScore + 100
+            ),
+            ScoredConversionCandidateItem(
+                item: ConversionCandidateItem(
+                    text: halfWidthKatakanaText(from: targetText),
+                    consumedReadingLength: targetText.count,
+                    source: .fallback
+                ),
+                score: baseScore + 200
+            )
+        ]
+    }
+
+    nonisolated private static func scoredCandidateSort(
+        _ lhs: ScoredConversionCandidateItem,
+        _ rhs: ScoredConversionCandidateItem
+    ) -> Bool {
+        if lhs.score != rhs.score {
+            return lhs.score < rhs.score
+        }
+        return lhs.item.text < rhs.item.text
+    }
+
+    nonisolated private static func uniqueCandidateItems(_ items: [ConversionCandidateItem]) -> [ConversionCandidateItem] {
+        var seen = Set<String>()
+        return items.filter { seen.insert($0.text).inserted }
+    }
+
+    nonisolated private static func isDisplayableConversionCandidate(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 0x1B000...0x1B16F:
+                return false
+            default:
+                return true
+            }
+        }
     }
 
     private func conversionTargetText() -> String {
@@ -5340,14 +5703,24 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
         if let cachedConverter = Self.cachedKanaKanjiConverter {
             kanaKanjiConverter = cachedConverter
+            loadEnglishDictionaryIfNeeded()
             converterLoadFailureMessage = nil
             renderCurrentComposingText()
             updatePreedit()
             return
         }
 
-        guard let artifactsDirectory = kanaKanjiArtifactsDirectory() else {
+        let resources = KanaKanjiBundleResources()
+        loadEnglishDictionaryIfNeeded(resources: resources)
+        guard let mainArtifactsDirectory = resources.mainArtifactsDirectory() else {
             converterLoadFailureMessage = "KanaKanji resources were not found in the keyboard bundle."
+            return
+        }
+
+        let sharedPOSTableURL = resources.sharedPOSTableURL()
+        let supplementalArtifactDirectories = resources.availableSupplementalArtifactDirectories()
+        guard let connectionMatrixURL = resources.connectionMatrixURL(forMainArtifactsDirectory: mainArtifactsDirectory) else {
+            converterLoadFailureMessage = "KanaKanji connection matrix was not found in the keyboard bundle."
             return
         }
 
@@ -5357,12 +5730,56 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             let result: Result<KanaKanjiConverter, Error>
 
             do {
-                let dictionary = try MozcDictionary(artifactsDirectory: artifactsDirectory)
-                let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(
-                    artifactsDirectory.appendingPathComponent("connection_single_column.bin")
+                let mainDictionary = try MozcDictionary(
+                    artifactsDirectory: mainArtifactsDirectory,
+                    sharedPOSTableURL: sharedPOSTableURL
                 )
+                var loadedSupplementals: [SupplementalDictionaryKind: MozcDictionary] = [:]
+                var loadedSupplementalNames: [String] = []
+                var missingSupplementalNames: [String] = []
+                var failedSupplementalMessages: [String] = []
+
+                for kind in SupplementalDictionaryKind.allCases {
+                    guard let directory = supplementalArtifactDirectories[kind] else {
+                        missingSupplementalNames.append(kind.resourceDirectoryName)
+                        continue
+                    }
+
+                    do {
+                        loadedSupplementals[kind] = try MozcDictionary(
+                            artifactsDirectory: directory,
+                            sharedPOSTableURL: sharedPOSTableURL
+                        )
+                        loadedSupplementalNames.append(kind.resourceDirectoryName)
+                    } catch {
+                        failedSupplementalMessages.append("\(kind.resourceDirectoryName): \(error.localizedDescription)")
+                    }
+                }
+
+                if failedSupplementalMessages.isEmpty {
+                    NSLog(
+                        "KanaKanji dictionaries loaded. main=%@ supplementals=%@ missing=%@",
+                        mainArtifactsDirectory.path,
+                        loadedSupplementalNames.joined(separator: ","),
+                        missingSupplementalNames.joined(separator: ",")
+                    )
+                } else {
+                    NSLog(
+                        "KanaKanji dictionaries loaded with supplemental failures. main=%@ loaded=%@ missing=%@ failed=%@",
+                        mainArtifactsDirectory.path,
+                        loadedSupplementalNames.joined(separator: ","),
+                        missingSupplementalNames.joined(separator: ","),
+                        failedSupplementalMessages.joined(separator: " | ")
+                    )
+                }
+
+                let dictionarySet = LoadedDictionarySet(
+                    main: mainDictionary,
+                    supplementals: SupplementalDictionaryStore(loadedSupplementals)
+                )
+                let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(connectionMatrixURL)
                 result = .success(KanaKanjiConverter(
-                    dictionary: dictionary,
+                    dictionarySet: dictionarySet,
                     connectionMatrix: connectionMatrix
                 ))
             } catch {
@@ -5390,31 +5807,55 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func kanaKanjiArtifactsDirectory() -> URL? {
-        let fileManager = FileManager.default
-        var candidateDirectories: [URL] = []
-
-        if let bundledDirectory = Bundle.main.url(forResource: "KanaKanjiResources", withExtension: nil) {
-            candidateDirectories.append(bundledDirectory)
+    private func loadEnglishDictionaryIfNeeded(resources: KanaKanjiBundleResources = KanaKanjiBundleResources()) {
+        guard englishEngine == nil, isLoadingEnglishDictionary == false else {
+            return
         }
 
-        if let resourceDirectory = Bundle.main.resourceURL {
-            candidateDirectories.append(resourceDirectory.appendingPathComponent("KanaKanjiResources", isDirectory: true))
-            candidateDirectories.append(resourceDirectory)
+        if let cachedEngine = Self.cachedEnglishEngine {
+            englishEngine = cachedEngine
+            return
         }
 
-        return candidateDirectories.first { directory in
-            MozcDictionary.artifactFileNames.allSatisfy { fileName in
-                fileManager.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+        guard let englishArtifactsDirectory = resources.englishArtifactsDirectory() else {
+            return
+        }
+
+        isLoadingEnglishDictionary = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result: Result<EnglishEngine, Error>
+            do {
+                let dictionary = try EnglishDictionary(artifactsDirectory: englishArtifactsDirectory)
+                result = .success(EnglishEngine(dictionary: dictionary))
+            } catch {
+                result = .failure(error)
+            }
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    return
+                }
+
+                self.isLoadingEnglishDictionary = false
+                switch result {
+                case .success(let engine):
+                    self.englishEngine = engine
+                    Self.cachedEnglishEngine = engine
+                    NSLog("English dictionary loaded. artifacts=%@", englishArtifactsDirectory.path)
+                case .failure(let error):
+                    self.englishEngine = nil
+                    NSLog("English dictionary failed to load. artifacts=%@ error=%@", englishArtifactsDirectory.path, error.localizedDescription)
+                }
+                self.updatePreedit()
             }
         }
     }
 
-    private func katakanaText(from text: String) -> String {
+    nonisolated private static func katakanaText(from text: String) -> String {
         text.applyingTransform(.hiraganaToKatakana, reverse: false) ?? text
     }
 
-    private func halfWidthKatakanaText(from text: String) -> String {
+    nonisolated private static func halfWidthKatakanaText(from text: String) -> String {
         let katakana = katakanaText(from: text)
         return katakana.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? katakana
     }

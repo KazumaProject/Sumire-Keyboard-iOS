@@ -1,12 +1,23 @@
 import Foundation
 
 public struct MozcDictionary: Sendable {
-    public static let artifactFileNames = [
+    public static let dictionaryArtifactFileNames = MozcArtifactIO.dictionaryFileNames
+    public static let posTableFileName = MozcArtifactIO.posTableFileName
+    public static let connectionMatrixFileName = MozcArtifactIO.connectionMatrixFileName
+
+    public static let artifactFileNames = dictionaryArtifactFileNames + [
+        posTableFileName,
+        connectionMatrixFileName
+    ]
+
+    public static let dictionaryArtifactFileNamesIncludingPOSTable = dictionaryArtifactFileNames + [
+        posTableFileName
+    ]
+
+    public static let supplementalArtifactFileNames = [
         "yomi_termid.louds",
         "tango.louds",
-        "token_array.bin",
-        "pos_table.bin",
-        "connection_single_column.bin"
+        "token_array.bin"
     ]
 
     struct PrefixMatch {
@@ -87,8 +98,11 @@ public struct MozcDictionary: Sendable {
         self.init(entries: entries)
     }
 
-    public init(artifactsDirectory directory: URL) throws {
-        self.storage = .artifacts(try MozcArtifactIO.loadDictionary(from: directory))
+    public init(artifactsDirectory directory: URL, sharedPOSTableURL: URL? = nil) throws {
+        self.storage = .artifacts(try MozcArtifactIO.loadDictionary(
+            from: directory,
+            sharedPOSTableURL: sharedPOSTableURL
+        ))
         self.entryCount = 0
     }
 
