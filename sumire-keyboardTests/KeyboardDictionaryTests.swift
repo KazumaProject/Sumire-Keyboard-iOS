@@ -2,6 +2,47 @@ import Foundation
 import Testing
 
 struct KeyboardDictionaryTests {
+    @Test func englishEngineProvidesCaseVariantsAndDictionaryPredictions() throws {
+        let engine = try Self.makeEnglishEngine()
+
+        let input = try #require(Self.findDictionaryBackedEnglishInput(using: engine))
+        let predictions = engine.getPrediction(input: input)
+
+        #expect(predictions.contains { $0.word == input })
+        #expect(predictions.contains { $0.word == input.replacingFirstCharacter { $0.uppercased() } })
+        #expect(predictions.contains { $0.word == input.uppercased() })
+        #expect(predictions.contains { $0.word.lowercased() != input.lowercased() })
+    }
+
+    @Test func englishFallbackCandidatesAreReturnedWithoutEngine() {
+        let fallbackCandidates = EnglishEngine.fallbackPrediction(input: "hel")
+
+        #expect(fallbackCandidates.map(\.word) == ["hel", "Hel", "HEL"])
+    }
+
+    @Test func englishPredictionsAreDeduplicatedBySurface() throws {
+        let engine = try Self.makeEnglishEngine()
+        let predictions = engine.getPrediction(input: "hel")
+        let words = predictions.map(\.word)
+
+        #expect(Set(words).count == words.count)
+    }
+
+    @Test func missingEnglishArtifactsFailGracefully() {
+        let missingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        #expect(EnglishArtifactIO.containsArtifacts(at: missingDirectory) == false)
+
+        var didThrow = false
+        do {
+            _ = try EnglishDictionary(artifactsDirectory: missingDirectory)
+        } catch {
+            didThrow = true
+        }
+        #expect(didThrow)
+    }
+
     @Test func auxiliaryCandidatesPreferLowerScoreForDuplicateTextAcrossSources() {
         let mainDictionary = MozcDictionary(entries: [
             DictionaryEntry(yomi: "あ", leftId: 0, rightId: 0, cost: 900, surface: "重複候補")
@@ -212,6 +253,24 @@ struct KeyboardDictionaryTests {
         let connectionMatrix = try ConnectionMatrix.loadBinaryBigEndianInt16(connectionMatrixURL)
         return KanaKanjiConverter(dictionarySet: dictionarySet, connectionMatrix: connectionMatrix)
     }
+
+    private static func makeEnglishEngine() throws -> EnglishEngine {
+        let englishDirectory = repositoryRoot()
+            .appendingPathComponent("sumire-keyboardKeyboard/KanaKanjiResources/english", isDirectory: true)
+        #expect(EnglishArtifactIO.containsArtifacts(at: englishDirectory))
+        let dictionary = try EnglishDictionary(artifactsDirectory: englishDirectory)
+        return EnglishEngine(dictionary: dictionary)
+    }
+
+    private static func findDictionaryBackedEnglishInput(using engine: EnglishEngine) -> String? {
+        ["hel", "app", "sum", "pro", "con", "de", "a"]
+            .first { input in
+                engine.getPrediction(input: input)
+                    .contains { candidate in
+                        candidate.word.lowercased() != input.lowercased()
+                    }
+            }
+    }
 }
 
 private extension UInt32 {
@@ -223,5 +282,17 @@ private extension UInt32 {
 private extension Int16 {
     var littleEndianBytes: [UInt8] {
         withUnsafeBytes(of: littleEndian) { Array($0) }
+    }
+}
+
+private extension String {
+    func replacingFirstCharacter(_ transform: (Character) -> String) -> String {
+        guard let first else {
+            return self
+        }
+
+        var output = String(self)
+        output.replaceSubrange(startIndex...startIndex, with: transform(first))
+        return output
     }
 }
