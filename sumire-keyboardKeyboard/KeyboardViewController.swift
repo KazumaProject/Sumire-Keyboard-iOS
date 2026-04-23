@@ -1280,6 +1280,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private let keyboardMaximumHeight: CGFloat = 520
     private let keyboardBottomMarginStep: CGFloat = 4
     private let keyboardMaximumBottomMargin: CGFloat = 80
+    private let candidateBarDefaultHeight: CGFloat = 38
+    private let candidateBarExpandedHeight: CGFloat = 56
     private let multiTapInterval: TimeInterval = 1.1
     private let flickThreshold: CGFloat = 22
     private static let hostDeletionDelimiters = Set<Character>([
@@ -1303,6 +1305,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var scheduledKanaKanjiLoad: DispatchWorkItem?
     private var kanaKanjiLoadGeneration = 0
     private var keyboardHeightConstraint: NSLayoutConstraint?
+    private var candidateBarHeightConstraint: NSLayoutConstraint?
     private var contentLeadingConstraint: NSLayoutConstraint?
     private var contentTrailingConstraint: NSLayoutConstraint?
     private var contentBottomConstraint: NSLayoutConstraint?
@@ -1434,6 +1437,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         self.contentLeadingConstraint = contentLeadingConstraint
         self.contentTrailingConstraint = contentTrailingConstraint
 
+        let candidateBarHeightConstraint = candidateBar.heightAnchor.constraint(
+            equalToConstant: candidateBarDefaultHeight
+        )
+        self.candidateBarHeightConstraint = candidateBarHeightConstraint
+
         NSLayoutConstraint.activate([
             keyboardHeightConstraint,
 
@@ -1442,7 +1450,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             contentTrailingConstraint,
             contentBottomConstraint,
 
-            candidateBar.heightAnchor.constraint(equalToConstant: 38)
+            candidateBarHeightConstraint
         ])
 
         applyStoredKeyboardLayoutMetricsIfNeeded(force: true)
@@ -1961,7 +1969,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             contentTrailingConstraint?.constant = -keyboardHorizontalInset
         }
 
-        keyboardHeightConstraint?.constant = CGFloat(sanitizedMetrics.height)
+        updateKeyboardHeightConstraintForCurrentState()
         contentBottomConstraint?.constant = -CGFloat(sanitizedMetrics.bottomMargin)
 
         if persists {
@@ -1970,6 +1978,15 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
 
         view.setNeedsLayout()
         view.layoutIfNeeded()
+    }
+
+    private func updateKeyboardHeightConstraintForCurrentState() {
+        let baseHeight = CGFloat(currentLayoutMetrics.height)
+        let candidateBarDelta = max(
+            0,
+            (candidateBarHeightConstraint?.constant ?? candidateBarDefaultHeight) - candidateBarDefaultHeight
+        )
+        keyboardHeightConstraint?.constant = baseHeight + candidateBarDelta
     }
 
     private func sanitizedKeyboardLayoutMetrics(
@@ -3932,10 +3949,14 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     private func updatePreeditReadingPreview() {
-        guard preeditReadingPreviewEnabled,
-              mainKeyboardPanel != .emoji,
-              isDirectMode == false,
-              composingText.isEmpty == false else {
+        let shouldShowPreview = preeditReadingPreviewEnabled
+            && mainKeyboardPanel != .emoji
+            && isDirectMode == false
+            && composingText.isEmpty == false
+
+        updateCandidateBarHeight(showsPreeditReadingPreview: shouldShowPreview)
+
+        guard shouldShowPreview else {
             preeditReadingView.clear()
             return
         }
@@ -3946,6 +3967,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             conversionRange: activeRange,
             nonTargetRanges: nonConversionPreeditRanges(textCount: composingText.count, conversionRange: activeRange)
         )
+    }
+
+    private func updateCandidateBarHeight(showsPreeditReadingPreview: Bool) {
+        let targetHeight = showsPreeditReadingPreview
+            ? candidateBarExpandedHeight
+            : candidateBarDefaultHeight
+        guard candidateBarHeightConstraint?.constant != targetHeight else {
+            return
+        }
+
+        candidateBarHeightConstraint?.constant = targetHeight
+        updateKeyboardHeightConstraintForCurrentState()
+        view.setNeedsLayout()
     }
 
     private func nonConversionPreeditRanges(
