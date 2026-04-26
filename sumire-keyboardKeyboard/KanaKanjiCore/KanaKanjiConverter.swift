@@ -210,7 +210,9 @@ public struct KanaKanjiConverter: Sendable {
             let candidate = ConversionCandidate(
                 text: entry.surface,
                 reading: entry.yomi,
-                score: score
+                score: score,
+                leftId: entry.leftId,
+                rightId: entry.rightId
             )
 
             if let current = bestByText[entry.surface] {
@@ -363,7 +365,9 @@ public struct KanaKanjiConverter: Sendable {
                     text: entry.surface,
                     reading: entry.yomi,
                     score: entry.cost + penaltyCost,
-                    consumedLength: isFullMatch ? nil : match.length
+                    consumedLength: isFullMatch ? nil : match.length,
+                    leftId: entry.leftId,
+                    rightId: entry.rightId
                 )
 
                 if let current = bestByText[entry.surface] {
@@ -568,7 +572,14 @@ public struct KanaKanjiConverter: Sendable {
 
                 if seenSurfaces.insert(surface).inserted {
                     let score = current.totalCost + (containsDigit(surface) ? 2000 : 0)
-                    results.append(ConversionCandidate(text: surface, reading: yomi, score: score))
+                    let lexicalNode = singleLexicalNode(fromBOSState: current)
+                    results.append(ConversionCandidate(
+                        text: surface,
+                        reading: yomi,
+                        score: score,
+                        leftId: lexicalNode?.leftId,
+                        rightId: lexicalNode?.rightId
+                    ))
                     if results.count >= nBest {
                         return results
                     }
@@ -663,6 +674,19 @@ public struct KanaKanjiConverter: Sendable {
         var current = state.next
         while let state = current, state.node.surface != "EOS" {
             result += state.node.yomi
+            current = state.next
+        }
+        return result
+    }
+
+    private func singleLexicalNode(fromBOSState state: State) -> Node? {
+        var result: Node?
+        var current = state.next
+        while let state = current, state.node.surface != "EOS" {
+            guard result == nil else {
+                return nil
+            }
+            result = state.node
             current = state.next
         }
         return result

@@ -67,7 +67,16 @@ enum MozcArtifactIO {
     }
 
     static func writeDictionaryArtifacts(from sourceDirectory: URL, to outputDirectory: URL) throws {
-        let entries = try loadAllEntries(from: sourceDirectory)
+        try writeDictionaryArtifactsWithConnectionMatrix(
+            from: sourceDirectory,
+            to: outputDirectory
+        )
+    }
+
+    static func writeDictionaryArtifacts(
+        from entries: [DictionaryEntry],
+        to outputDirectory: URL
+    ) throws {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         var grouped: [String: [DictionaryEntry]] = [:]
@@ -104,6 +113,14 @@ enum MozcArtifactIO {
 
         let tokenArray = buildTokenArray(keys: keys, grouped: grouped, posIndexByPair: pos.indexByPair, tangoNodeIndexBySurface: tangoBuilt.nodeIndexByKey)
         try writeTokenArray(tokenArray, to: outputDirectory.appendingPathComponent("token_array.bin"))
+    }
+
+    static func writeDictionaryArtifactsWithConnectionMatrix(
+        from sourceDirectory: URL,
+        to outputDirectory: URL
+    ) throws {
+        let entries = try loadAllEntries(from: sourceDirectory)
+        try writeDictionaryArtifacts(from: entries, to: outputDirectory)
 
         let connectionText = sourceDirectory.appendingPathComponent("connection_single_column.txt")
         if FileManager.default.fileExists(atPath: connectionText.path) {

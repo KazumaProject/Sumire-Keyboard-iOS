@@ -69,12 +69,37 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case singleKanji
         case english
         case direct
+        case learning
+        case user
+
+        var candidateSourceKind: CandidateSourceKind {
+            switch self {
+            case .main:
+                return .systemMain
+            case .auxiliary:
+                return .systemAuxiliary
+            case .fallback:
+                return .fallback
+            case .singleKanji:
+                return .systemSingleKanji
+            case .english:
+                return .systemEnglish
+            case .direct:
+                return .direct
+            case .learning:
+                return .learning
+            case .user:
+                return .user
+            }
+        }
     }
 
     private struct ConversionCandidateItem: Hashable, Sendable {
         let text: String
+        let reading: String
         let consumedReadingLength: Int
         let source: ConversionCandidateSource
+        let lexicalInfo: CandidateLexicalInfo?
     }
 
     private struct CandidateButtonConfiguration: Hashable {
@@ -91,6 +116,26 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private struct ScoredConversionCandidateItem: Sendable {
         let item: ConversionCandidateItem
         let score: Int
+    }
+
+    private struct SystemCandidateSource: CandidateSource {
+        let kind: CandidateSourceKind
+        let exactCandidates: [Candidate]
+
+        func searchExact(reading: String, limit: Int) -> [Candidate] {
+            guard limit > 0 else {
+                return []
+            }
+            return exactCandidates.prefix(limit).map { $0 }
+        }
+
+        func searchCommonPrefix(inputReading: String, limit: Int) -> [Candidate] {
+            []
+        }
+
+        func searchPredictive(prefix: String, limit: Int) -> [Candidate] {
+            []
+        }
     }
 
     private struct ConversionCandidateLookupKey: Equatable, Sendable {
@@ -1227,6 +1272,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
     private var englishEngine: EnglishEngine?
+    private var dictionaryRepositories: DictionaryRepositories?
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
     private var isLoadingEnglishDictionary = false
@@ -1333,6 +1379,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.viewDidLoad()
 
         _ = syncSumireKeyboardSettings()
+        dictionaryRepositories = try? DictionaryRepositoryContainer.makeDefault()
         configureInputStatusForCurrentSumireKeyboard()
         view.backgroundColor = KeyboardTheme.keyboardBackground
         view.clipsToBounds = false
@@ -3389,8 +3436,20 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     private func commitCandidateItem(_ candidate: ConversionCandidateItem) {
+        let committedSelection = CommittedSelection(
+            inputReading: conversionTargetText(),
+            candidateReading: candidate.reading,
+            word: candidate.text,
+            sourceKind: candidate.source.candidateSourceKind,
+            lexicalInfo: candidate.lexicalInfo,
+            committedAt: Date()
+        )
         resetMultiTapState()
-        commitComposingText(candidate.text, consumedReadingLength: candidate.consumedReadingLength)
+        commitComposingText(
+            candidate.text,
+            consumedReadingLength: candidate.consumedReadingLength,
+            committedSelection: committedSelection
+        )
     }
 
     @objc private func handleEnterLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -4965,7 +5024,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func commitComposingText(_ text: String, consumedReadingLength: Int? = nil) {
+    private func commitComposingText(
+        _ text: String,
+        consumedReadingLength: Int? = nil,
+        committedSelection: CommittedSelection? = nil
+    ) {
         guard composingText.isEmpty == false else {
             return
         }
@@ -5010,6 +5073,19 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             syncPrecompositionPhaseForCurrentText()
         }
         updatePreedit()
+
+        guard let committedSelection,
+              let learningRepository = dictionaryRepositories?.learningRepository else {
+            return
+        }
+
+        Task {
+            do {
+                try await learningRepository.recordCommittedSelection(committedSelection)
+            } catch {
+                NSLog("Failed to record learning dictionary selection: %@", error.localizedDescription)
+            }
+        }
     }
 
     private func commitRenderedComposingTextAsTyped() {
@@ -5345,6 +5421,15 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let auxiliaryConversionCandidateLimit = auxiliaryConversionCandidateLimit
         let singleKanjiConversionCandidateLimit = singleKanjiConversionCandidateLimit
         let conversionBeamWidth = conversionBeamWidth
+        let dictionaryCandidateSources: [any CandidateSource]
+        if let dictionaryRepositories {
+            dictionaryCandidateSources = [
+                dictionaryRepositories.userCandidateSource,
+                dictionaryRepositories.learningCandidateSource
+            ]
+        } else {
+            dictionaryCandidateSources = []
+        }
 
         DispatchQueue.global(qos: .userInitiated).async {
             let candidates = Self.buildCandidateItems(
@@ -5356,7 +5441,8 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 auxiliaryConversionCandidateLimit: auxiliaryConversionCandidateLimit,
                 singleKanjiConversionCandidateLimit: singleKanjiConversionCandidateLimit,
                 conversionBeamWidth: conversionBeamWidth,
-                omissionSearchEnabled: key.omissionSearchEnabled
+                omissionSearchEnabled: key.omissionSearchEnabled,
+                dictionaryCandidateSources: dictionaryCandidateSources
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -5405,26 +5491,31 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         auxiliaryConversionCandidateLimit: Int,
         singleKanjiConversionCandidateLimit: Int,
         conversionBeamWidth: Int,
-        omissionSearchEnabled: Bool
+        omissionSearchEnabled: Bool,
+        dictionaryCandidateSources: [any CandidateSource] = []
     ) -> [ConversionCandidateItem] {
-        var seen = Set<String>()
-        var candidates: [ConversionCandidateItem] = []
+        var seenSystemText = Set<String>()
+        var systemCandidates: [Candidate] = []
 
-        func appendUnique(
+        func appendSystemCandidate(
             _ text: String,
+            reading: String = targetText,
             consumedReadingLength: Int = targetText.count,
-            source: ConversionCandidateSource
+            source: ConversionCandidateSource,
+            lexicalInfo: CandidateLexicalInfo? = nil
         ) {
             guard text.isEmpty == false,
                   isDisplayableConversionCandidate(text),
-                  seen.insert(text).inserted else {
+                  seenSystemText.insert(text).inserted else {
                 return
             }
             let consumedLength = min(max(consumedReadingLength, 0), targetText.count)
-            candidates.append(ConversionCandidateItem(
-                text: text,
+            systemCandidates.append(Candidate(
+                reading: reading,
+                word: text,
                 consumedReadingLength: consumedLength,
-                source: source
+                sourceKind: source.candidateSourceKind,
+                lexicalInfo: lexicalInfo
             ))
         }
 
@@ -5434,14 +5525,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .english:
             if let englishEngine {
                 for candidate in englishEngine.getPrediction(input: targetText).prefix(conversionCandidateLimit) {
-                    appendUnique(candidate.word, source: .english)
+                    appendSystemCandidate(
+                        candidate.word,
+                        reading: candidate.reading,
+                        source: .english
+                    )
                 }
             }
-            appendUnique(targetText, source: .fallback)
-            return candidates
+            appendSystemCandidate(targetText, source: .fallback)
+            return mergeCandidateItems(
+                systemCandidates: systemCandidates,
+                dictionaryCandidateSources: dictionaryCandidateSources,
+                inputReading: targetText,
+                totalLimit: max(systemCandidates.count + dictionaryCandidateSources.count * conversionCandidateLimit, conversionCandidateLimit),
+                includesAuxiliaryCandidates: true
+            )
         case .number:
-            appendUnique(targetText, source: .direct)
-            return candidates
+            appendSystemCandidate(targetText, source: .direct)
+            return mergeCandidateItems(
+                systemCandidates: systemCandidates,
+                dictionaryCandidateSources: [],
+                inputReading: targetText,
+                totalLimit: max(systemCandidates.count, conversionCandidateLimit),
+                includesAuxiliaryCandidates: false
+            )
         }
 
         if let kanaKanjiConverter {
@@ -5466,7 +5573,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             )
 
             for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
-                appendUnique(candidate.text, source: .main)
+                appendSystemCandidate(
+                    candidate.text,
+                    reading: candidate.reading,
+                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                    source: .main,
+                    lexicalInfo: lexicalInfo(from: candidate)
+                )
             }
 
             let auxiliaryOptions = ConversionOptions(
@@ -5488,8 +5601,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                     ScoredConversionCandidateItem(
                         item: ConversionCandidateItem(
                             text: candidate.text,
+                            reading: candidate.reading,
                             consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
-                            source: .auxiliary
+                            source: .auxiliary,
+                            lexicalInfo: lexicalInfo(from: candidate)
                         ),
                         score: candidate.score
                     )
@@ -5502,28 +5617,126 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             ))
 
             for candidate in auxiliaryCandidates.sorted(by: scoredCandidateSort) {
-                appendUnique(
+                appendSystemCandidate(
                     candidate.item.text,
+                    reading: candidate.item.reading,
                     consumedReadingLength: candidate.item.consumedReadingLength,
-                    source: candidate.item.source
+                    source: candidate.item.source,
+                    lexicalInfo: candidate.item.lexicalInfo
                 )
             }
 
             for candidate in singleKanjiCandidates {
-                appendUnique(candidate.text, source: .singleKanji)
+                appendSystemCandidate(
+                    candidate.text,
+                    reading: candidate.reading,
+                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                    source: .singleKanji,
+                    lexicalInfo: lexicalInfo(from: candidate)
+                )
             }
         } else {
             for candidate in fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
                 .sorted(by: scoredCandidateSort) {
-                appendUnique(
+                appendSystemCandidate(
                     candidate.item.text,
+                    reading: candidate.item.reading,
                     consumedReadingLength: candidate.item.consumedReadingLength,
-                    source: candidate.item.source
+                    source: candidate.item.source,
+                    lexicalInfo: candidate.item.lexicalInfo
                 )
             }
         }
 
-        return candidates
+        return mergeCandidateItems(
+            systemCandidates: systemCandidates,
+            dictionaryCandidateSources: dictionaryCandidateSources,
+            inputReading: targetText,
+            totalLimit: max(
+                systemCandidates.count + dictionaryCandidateSources.count * conversionCandidateLimit,
+                conversionCandidateLimit + auxiliaryConversionCandidateLimit + singleKanjiConversionCandidateLimit
+            ),
+            includesAuxiliaryCandidates: true
+        )
+    }
+
+    nonisolated private static func mergeCandidateItems(
+        systemCandidates: [Candidate],
+        dictionaryCandidateSources: [any CandidateSource],
+        inputReading: String,
+        totalLimit: Int,
+        includesAuxiliaryCandidates: Bool
+    ) -> [ConversionCandidateItem] {
+        let effectiveLimit = max(totalLimit, 0)
+        guard effectiveLimit > 0 else {
+            return []
+        }
+
+        // システム候補を source kind ごとにグループ化して SystemCandidateSource に変換する。
+        // こうすることで user/learning dictionary 候補と system 候補を単一のパイプラインに
+        // 通せるようになり、同じ reading+word を持つ候補が sourcePriority に基づいて
+        // 正しく残される（先入れ優先の appendUniqueCandidate によって user/learning 候補が
+        // 消える問題を解消する）。
+        var systemByKind: [CandidateSourceKind: [Candidate]] = [:]
+        for candidate in systemCandidates {
+            systemByKind[candidate.sourceKind, default: []].append(candidate)
+        }
+        let systemSources: [any CandidateSource] = systemByKind.map { kind, candidates in
+            SystemCandidateSource(kind: kind, exactCandidates: candidates)
+        }
+
+        // dictionaryCandidateSources (user, learning) を前に並べるが、
+        // 最終的な順序は mergePolicy.sourcePriority が制御するため挿入順は影響しない。
+        let allSources: [any CandidateSource] = dictionaryCandidateSources + systemSources
+
+        let mergePolicy = CandidateMergePolicy(
+            sourcePriority: [.user, .learning, .systemMain, .systemAuxiliary, .systemSingleKanji, .systemEnglish, .fallback, .direct],
+            scoreStrategy: .max,
+            totalLimit: effectiveLimit,
+            includesAuxiliaryCandidates: includesAuxiliaryCandidates
+        )
+        let pipeline = CandidatePipeline(sources: allSources, mergePolicy: mergePolicy)
+
+        return pipeline.candidates(for: inputReading, limit: effectiveLimit).map { candidate in
+            ConversionCandidateItem(
+                text: candidate.word,
+                reading: candidate.reading,
+                consumedReadingLength: min(max(candidate.consumedReadingLength, 0), inputReading.count),
+                source: conversionCandidateSource(from: candidate.sourceKind),
+                lexicalInfo: candidate.lexicalInfo
+            )
+        }
+    }
+
+    nonisolated private static func lexicalInfo(from candidate: ConversionCandidate) -> CandidateLexicalInfo? {
+        guard let leftId = candidate.leftId,
+              let rightId = candidate.rightId else {
+            return nil
+        }
+        return CandidateLexicalInfo(score: candidate.score, leftId: leftId, rightId: rightId)
+    }
+
+    nonisolated private static func conversionCandidateSource(
+        from sourceKind: CandidateSourceKind
+    ) -> ConversionCandidateSource {
+        switch sourceKind {
+        case .systemMain:
+            return .main
+        case .systemAuxiliary:
+            return .auxiliary
+        case .systemSingleKanji:
+            return .singleKanji
+        case .systemEnglish:
+            return .english
+        case .learning:
+            return .learning
+        case .user:
+            return .user
+        case .fallback:
+            return .fallback
+        case .direct:
+            return .direct
+        }
     }
 
     nonisolated private static func immediateCandidateItems(
@@ -5538,8 +5751,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .english, .number:
             return [ConversionCandidateItem(
                 text: targetText,
+                reading: targetText,
                 consumedReadingLength: targetText.count,
-                source: language == .english ? .fallback : .direct
+                source: language == .english ? .fallback : .direct,
+                lexicalInfo: nil
             )]
         }
     }
@@ -5552,24 +5767,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: targetText,
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore
             ),
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: katakanaText(from: targetText),
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore + 100
             ),
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: halfWidthKatakanaText(from: targetText),
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore + 200
             )
