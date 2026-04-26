@@ -17,6 +17,9 @@ enum KeyboardSettings {
         static let keyboardLeadingOffsetLandscape = "SumireKeyboardLeadingOffsetLandscape"
         static let keyboardHeightLandscape = "SumireKeyboardHeightLandscape"
         static let keyboardBottomMarginLandscape = "SumireKeyboardBottomMarginLandscape"
+        /// 学習辞書の prefix / predictive 検索を開始する入力文字数のキー。
+        /// ユーザー辞書には適用しない。
+        static let predictiveConversionStartLength = "SumireKeyboardPredictiveConversionStartLength"
     }
 
     enum JapaneseFlickInputMode: String, CaseIterable, Identifiable {
@@ -144,6 +147,10 @@ enum KeyboardSettings {
         var bottomMargin: Double
     }
 
+    /// 学習辞書の予測変換開始文字数のデフォルト値。
+    /// KanaKanjiConverter.predict() の開始条件 (input.count >= 3) と同じ値。
+    static let defaultPredictiveConversionStartLength = 3
+
     static let appGroupIdentifier = "group.com.kazumaproject.sumire-keyboard"
     static let settingsURL = URL(string: "sumirekeyboard://settings")
     static let defaultKeyboardLeadingOffset: Double = 6
@@ -197,6 +204,22 @@ enum KeyboardSettings {
         }
         set {
             defaults.set(newValue, forKey: Keys.omissionSearchEnabled)
+        }
+    }
+
+    /// 学習辞書の prefix / predictive 検索を開始する入力文字数。
+    /// 有効範囲: 1...10。未設定時は `defaultPredictiveConversionStartLength` (3) を返す。
+    /// ユーザー辞書には適用しない（ユーザー辞書は通常予測変換ルール固定）。
+    static var predictiveConversionStartLength: Int {
+        get {
+            guard defaults.object(forKey: Keys.predictiveConversionStartLength) != nil else {
+                return defaultPredictiveConversionStartLength
+            }
+            let value = defaults.integer(forKey: Keys.predictiveConversionStartLength)
+            return min(max(value, 1), 10)
+        }
+        set {
+            defaults.set(min(max(newValue, 1), 10), forKey: Keys.predictiveConversionStartLength)
         }
     }
 

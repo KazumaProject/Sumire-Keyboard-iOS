@@ -38,6 +38,12 @@ struct ContentView: View {
     )
     private var usesHalfWidthSpace = false
 
+    @AppStorage(
+        KeyboardSettings.Keys.predictiveConversionStartLength,
+        store: KeyboardSettings.defaults
+    )
+    private var predictiveConversionStartLength = KeyboardSettings.defaultPredictiveConversionStartLength
+
     @State private var keyboards: [KeyboardSettings.SumireKeyboard] = []
     @State private var currentKeyboardID = ""
     @State private var keyboardEditorRoute: KeyboardEditorRoute?
@@ -158,6 +164,16 @@ struct ContentView: View {
                 Text(usesHalfWidthSpace ? "半角" : "全角")
                     .foregroundStyle(.secondary)
             }
+
+            Stepper(
+                "学習辞書の予測変換を開始する文字数: \(predictiveConversionStartLength)文字",
+                value: $predictiveConversionStartLength,
+                in: 1...10
+            )
+
+            Text("入力文字数が指定した数に達してから、学習辞書の予測候補を表示します。ユーザー辞書と完全一致候補には影響しません。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 

@@ -146,30 +146,30 @@ final class UserDictionaryBinaryArtifact: @unchecked Sendable {
             .map(Self.candidate(from:))
     }
 
-    func searchCommonPrefix(inputReading: String, limit: Int) -> [Candidate] {
+    /// - Parameter maxReadingLength: `nil` の場合は上限なし。
+    ///   `DictionaryPredictiveSearchPolicy.maxReadingLength(forInput:)` の値を渡す。
+    func searchCommonPrefix(inputReading: String, limit: Int, maxReadingLength: Int? = nil) -> [Candidate] {
         guard inputReading.isEmpty == false, limit > 0 else {
             return []
         }
 
-        return entries(forPrefix: inputReading, limit: limit)
+        return entries(forPrefix: inputReading, limit: limit, maxReadingLength: maxReadingLength)
     }
 
-    func searchPredictive(prefix: String, limit: Int) -> [Candidate] {
+    func searchPredictive(prefix: String, limit: Int, maxReadingLength: Int? = nil) -> [Candidate] {
         guard prefix.isEmpty == false, limit > 0 else {
             return []
         }
 
-        return entries(
-            forPrefix: prefix,
-            limit: limit
-        )
+        return entries(forPrefix: prefix, limit: limit, maxReadingLength: maxReadingLength)
     }
 
-    private func entries(forPrefix prefix: String, limit: Int) -> [Candidate] {
+    private func entries(forPrefix prefix: String, limit: Int, maxReadingLength: Int? = nil) -> [Candidate] {
         dictionary.predictiveEntries(
             for: prefix,
             predictivePrefixLength: prefix.count,
-            limit: limit
+            limit: limit,
+            maxYomiLength: maxReadingLength
         ).map(Self.candidate(from:))
     }
 

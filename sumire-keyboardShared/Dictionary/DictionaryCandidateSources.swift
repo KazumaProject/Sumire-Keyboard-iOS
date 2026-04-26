@@ -1,5 +1,38 @@
 import Foundation
 
+// MARK: - DictionaryPredictiveSearchPolicy
+
+/// 辞書ソース別の予測変換ルールをまとめたヘルパー。
+///
+/// - ユーザー辞書は `allowsSystemStylePredictiveSearch` に従う（通常予測変換と同じ 3文字開始）。
+/// - 学習辞書は `allowsLearningPredictiveSearch` に従う（KeyboardSettings で可変）。
+/// - 読み長上限 `maxReadingLength` は両辞書共通: input.count < 6 → input.count + 2, それ以上 → nil。
+struct DictionaryPredictiveSearchPolicy: Sendable {
+    /// ユーザー辞書 / 通常予測変換の開始文字数（KanaKanjiConverter.predict() と同じ値）。
+    static let defaultSystemPredictiveStartLength = 3
+
+    /// ユーザー辞書向け: 通常予測変換ルールで prefix / predictive 検索を許可するか。
+    /// `predictiveConversionStartLength` 設定には依存しない。
+    static func allowsSystemStylePredictiveSearch(input: String) -> Bool {
+        input.count >= defaultSystemPredictiveStartLength
+    }
+
+    /// 学習辞書向け: `startLength` 以上の入力長で prefix / predictive 検索を許可するか。
+    /// - Parameter startLength: `KeyboardSettings.predictiveConversionStartLength` を渡す。
+    static func allowsLearningPredictiveSearch(input: String, startLength: Int) -> Bool {
+        input.count >= startLength
+    }
+
+    /// 読み長の上限を返す（両辞書共通ルール、KanaKanjiConverter.predictiveMaxYomiLength と同じ）。
+    /// - Returns: `input.count < 6` のとき `input.count + 2`、それ以上のとき `nil`（上限なし）。
+    static func maxReadingLength(forInput input: String) -> Int? {
+        let inputLength = input.count
+        return inputLength < 6 ? inputLength + 2 : nil
+    }
+}
+
+// MARK: - LearningDictionaryCandidateSource
+
 struct LearningDictionaryCandidateSource: CandidateSource {
     let kind: CandidateSourceKind = .learning
     private let store: SQLiteDictionaryStore
@@ -12,12 +45,36 @@ struct LearningDictionaryCandidateSource: CandidateSource {
         (try? store.searchLearningExact(reading: reading, limit: limit).map(Self.candidate(from:))) ?? []
     }
 
+    /// prefix / predictive 検索: `KeyboardSettings.predictiveConversionStartLength` 文字未満では返さない。
+    /// exact 検索 (`searchExact`) は設定値に関係なく常に動作する。
     func searchCommonPrefix(inputReading: String, limit: Int) -> [Candidate] {
-        (try? store.searchLearningPrefix(prefix: inputReading, limit: limit).map(Self.candidate(from:))) ?? []
+        guard DictionaryPredictiveSearchPolicy.allowsLearningPredictiveSearch(
+            input: inputReading,
+            startLength: KeyboardSettings.predictiveConversionStartLength
+        ) else {
+            return []
+        }
+        let maxReadingLength = DictionaryPredictiveSearchPolicy.maxReadingLength(forInput: inputReading)
+        return (try? store.searchLearningPrefix(
+            prefix: inputReading,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        ).map(Self.candidate(from:))) ?? []
     }
 
     func searchPredictive(prefix: String, limit: Int) -> [Candidate] {
-        (try? store.searchLearningPrefix(prefix: prefix, limit: limit).map(Self.candidate(from:))) ?? []
+        guard DictionaryPredictiveSearchPolicy.allowsLearningPredictiveSearch(
+            input: prefix,
+            startLength: KeyboardSettings.predictiveConversionStartLength
+        ) else {
+            return []
+        }
+        let maxReadingLength = DictionaryPredictiveSearchPolicy.maxReadingLength(forInput: prefix)
+        return (try? store.searchLearningPrefix(
+            prefix: prefix,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        ).map(Self.candidate(from:))) ?? []
     }
 
     private static func candidate(from entry: LearningDictionaryEntry) -> Candidate {
@@ -55,21 +112,48 @@ final class UserDictionaryCandidateSource: @unchecked Sendable, CandidateSource 
         return Self.mergeDedup(sqlite: sqliteCandidates, artifact: artifactCandidates, limit: limit)
     }
 
+    /// prefix / predictive 検索: 通常予測変換ルール（3文字以上、読み長制限あり）に従う。
+    /// `predictiveConversionStartLength` 設定には依存しない。
+    /// exact 検索 (`searchExact`) は常に動作する。
     func searchCommonPrefix(inputReading: String, limit: Int) -> [Candidate] {
-        let sqliteCandidates = (try? store.searchUserPrefix(prefix: inputReading, limit: limit).map(Self.candidate(from:))) ?? []
+        guard DictionaryPredictiveSearchPolicy.allowsSystemStylePredictiveSearch(input: inputReading) else {
+            return []
+        }
+        let maxReadingLength = DictionaryPredictiveSearchPolicy.maxReadingLength(forInput: inputReading)
+        let sqliteCandidates = (try? store.searchUserPrefix(
+            prefix: inputReading,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        ).map(Self.candidate(from:))) ?? []
         guard let artifact = currentArtifact() else {
             return sqliteCandidates
         }
-        let artifactCandidates = artifact.searchCommonPrefix(inputReading: inputReading, limit: limit)
+        let artifactCandidates = artifact.searchCommonPrefix(
+            inputReading: inputReading,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        )
         return Self.mergeDedup(sqlite: sqliteCandidates, artifact: artifactCandidates, limit: limit)
     }
 
     func searchPredictive(prefix: String, limit: Int) -> [Candidate] {
-        let sqliteCandidates = (try? store.searchUserPrefix(prefix: prefix, limit: limit).map(Self.candidate(from:))) ?? []
+        guard DictionaryPredictiveSearchPolicy.allowsSystemStylePredictiveSearch(input: prefix) else {
+            return []
+        }
+        let maxReadingLength = DictionaryPredictiveSearchPolicy.maxReadingLength(forInput: prefix)
+        let sqliteCandidates = (try? store.searchUserPrefix(
+            prefix: prefix,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        ).map(Self.candidate(from:))) ?? []
         guard let artifact = currentArtifact() else {
             return sqliteCandidates
         }
-        let artifactCandidates = artifact.searchPredictive(prefix: prefix, limit: limit)
+        let artifactCandidates = artifact.searchPredictive(
+            prefix: prefix,
+            limit: limit,
+            maxReadingLength: maxReadingLength
+        )
         return Self.mergeDedup(sqlite: sqliteCandidates, artifact: artifactCandidates, limit: limit)
     }
 

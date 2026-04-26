@@ -84,21 +84,40 @@ final class SQLiteDictionaryStore: @unchecked Sendable {
         )
     }
 
-    func searchLearningPrefix(prefix: String, limit: Int) throws -> [LearningDictionaryEntry] {
+    func searchLearningPrefix(
+        prefix: String,
+        limit: Int,
+        maxReadingLength: Int? = nil
+    ) throws -> [LearningDictionaryEntry] {
         guard prefix.isEmpty == false, limit > 0 else {
             return []
         }
-        return try database.query(
-            """
-            SELECT id, reading, word, score, left_id, right_id, updated_at
-            FROM learning_dictionary_entries
-            WHERE reading LIKE ? ESCAPE '\\'
-            ORDER BY score ASC, updated_at DESC
-            LIMIT ?
-            """,
-            bindings: [.text(Self.likePrefixPattern(prefix)), .int(limit)],
-            map: Self.learningEntry(from:)
-        )
+        if let maxReadingLength {
+            return try database.query(
+                """
+                SELECT id, reading, word, score, left_id, right_id, updated_at
+                FROM learning_dictionary_entries
+                WHERE reading LIKE ? ESCAPE '\\'
+                  AND length(reading) <= ?
+                ORDER BY score ASC, updated_at DESC
+                LIMIT ?
+                """,
+                bindings: [.text(Self.likePrefixPattern(prefix)), .int(maxReadingLength), .int(limit)],
+                map: Self.learningEntry(from:)
+            )
+        } else {
+            return try database.query(
+                """
+                SELECT id, reading, word, score, left_id, right_id, updated_at
+                FROM learning_dictionary_entries
+                WHERE reading LIKE ? ESCAPE '\\'
+                ORDER BY score ASC, updated_at DESC
+                LIMIT ?
+                """,
+                bindings: [.text(Self.likePrefixPattern(prefix)), .int(limit)],
+                map: Self.learningEntry(from:)
+            )
+        }
     }
 
     func searchLearningForManagementUI(query: String, limit: Int, offset: Int) throws -> [LearningDictionaryEntry] {
@@ -148,21 +167,40 @@ final class SQLiteDictionaryStore: @unchecked Sendable {
         )
     }
 
-    func searchUserPrefix(prefix: String, limit: Int) throws -> [UserDictionaryEntry] {
+    func searchUserPrefix(
+        prefix: String,
+        limit: Int,
+        maxReadingLength: Int? = nil
+    ) throws -> [UserDictionaryEntry] {
         guard prefix.isEmpty == false, limit > 0 else {
             return []
         }
-        return try database.query(
-            """
-            SELECT id, reading, word, score, left_id, right_id, updated_at
-            FROM user_dictionary_entries
-            WHERE reading LIKE ? ESCAPE '\\'
-            ORDER BY score ASC, updated_at DESC
-            LIMIT ?
-            """,
-            bindings: [.text(Self.likePrefixPattern(prefix)), .int(limit)],
-            map: Self.userEntry(from:)
-        )
+        if let maxReadingLength {
+            return try database.query(
+                """
+                SELECT id, reading, word, score, left_id, right_id, updated_at
+                FROM user_dictionary_entries
+                WHERE reading LIKE ? ESCAPE '\\'
+                  AND length(reading) <= ?
+                ORDER BY score ASC, updated_at DESC
+                LIMIT ?
+                """,
+                bindings: [.text(Self.likePrefixPattern(prefix)), .int(maxReadingLength), .int(limit)],
+                map: Self.userEntry(from:)
+            )
+        } else {
+            return try database.query(
+                """
+                SELECT id, reading, word, score, left_id, right_id, updated_at
+                FROM user_dictionary_entries
+                WHERE reading LIKE ? ESCAPE '\\'
+                ORDER BY score ASC, updated_at DESC
+                LIMIT ?
+                """,
+                bindings: [.text(Self.likePrefixPattern(prefix)), .int(limit)],
+                map: Self.userEntry(from:)
+            )
+        }
     }
 
     func searchUserForManagementUI(query: String, limit: Int, offset: Int) throws -> [UserDictionaryEntry] {
