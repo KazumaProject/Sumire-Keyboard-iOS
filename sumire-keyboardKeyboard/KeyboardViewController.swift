@@ -5672,48 +5672,32 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             return []
         }
 
-        var mergedCandidates: [Candidate] = []
-        mergedCandidates.reserveCapacity(effectiveLimit)
-
-        for candidate in systemCandidates.prefix(effectiveLimit) {
-            appendUniqueCandidate(candidate, to: &mergedCandidates)
+        // システム候補を source kind ごとにグループ化して SystemCandidateSource に変換する。
+        // こうすることで user/learning dictionary 候補と system 候補を単一のパイプラインに
+        // 通せるようになり、同じ reading+word を持つ候補が sourcePriority に基づいて
+        // 正しく残される（先入れ優先の appendUniqueCandidate によって user/learning 候補が
+        // 消える問題を解消する）。
+        var systemByKind: [CandidateSourceKind: [Candidate]] = [:]
+        for candidate in systemCandidates {
+            systemByKind[candidate.sourceKind, default: []].append(candidate)
+        }
+        let systemSources: [any CandidateSource] = systemByKind.map { kind, candidates in
+            SystemCandidateSource(kind: kind, exactCandidates: candidates)
         }
 
-        guard dictionaryCandidateSources.isEmpty == false,
-              mergedCandidates.count < effectiveLimit else {
-            return mergedCandidates.map {
-                ConversionCandidateItem(
-                    text: $0.word,
-                    reading: $0.reading,
-                    consumedReadingLength: min(max($0.consumedReadingLength, 0), inputReading.count),
-                    source: conversionCandidateSource(from: $0.sourceKind),
-                    lexicalInfo: $0.lexicalInfo
-                )
-            }
-        }
+        // dictionaryCandidateSources (user, learning) を前に並べるが、
+        // 最終的な順序は mergePolicy.sourcePriority が制御するため挿入順は影響しない。
+        let allSources: [any CandidateSource] = dictionaryCandidateSources + systemSources
 
         let mergePolicy = CandidateMergePolicy(
-            sourcePriority: [.user, .learning],
+            sourcePriority: [.user, .learning, .systemMain, .systemAuxiliary, .systemSingleKanji, .systemEnglish, .fallback, .direct],
             scoreStrategy: .max,
             totalLimit: effectiveLimit,
             includesAuxiliaryCandidates: includesAuxiliaryCandidates
         )
-        let pipeline = CandidatePipeline(
-            sources: dictionaryCandidateSources,
-            mergePolicy: mergePolicy
-        )
+        let pipeline = CandidatePipeline(sources: allSources, mergePolicy: mergePolicy)
 
-        for candidate in pipeline.candidates(
-            for: inputReading,
-            limit: max(effectiveLimit - mergedCandidates.count, 0)
-        ) {
-            guard mergedCandidates.count < effectiveLimit else {
-                break
-            }
-            appendUniqueCandidate(candidate, to: &mergedCandidates)
-        }
-
-        return mergedCandidates.map { candidate in
+        return pipeline.candidates(for: inputReading, limit: effectiveLimit).map { candidate in
             ConversionCandidateItem(
                 text: candidate.word,
                 reading: candidate.reading,
@@ -5722,17 +5706,6 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                 lexicalInfo: candidate.lexicalInfo
             )
         }
-    }
-
-    nonisolated private static func appendUniqueCandidate(
-        _ candidate: Candidate,
-        to candidates: inout [Candidate]
-    ) {
-        let key = candidate.dedupKey
-        guard candidates.contains(where: { $0.dedupKey == key }) == false else {
-            return
-        }
-        candidates.append(candidate)
     }
 
     nonisolated private static func lexicalInfo(from candidate: ConversionCandidate) -> CandidateLexicalInfo? {
