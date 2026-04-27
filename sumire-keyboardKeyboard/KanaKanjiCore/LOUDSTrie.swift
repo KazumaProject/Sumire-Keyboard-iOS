@@ -1,95 +1,141 @@
 import Foundation
 
+// LOUDSBitVector: LOUDSTrie 専用 bit vector。
+// CompatibleBitVector と同じ block-based 設計で zeroPositions を廃止。
 struct LOUDSBitVector: Sendable {
     let bitCount: Int
 
     private let words: [UInt64]
     private let rank1ByWord: [Int]
-    private let zeroPositions: [Int]
+
+    // Block-based select0 index
+    private static let bigBlockBits      = 256
+    private static let smallBlockBits    = 8
+    private static let smallBlocksPerBig = bigBlockBits / smallBlockBits  // 32
+
+    private let bigBlockRanks:   [Int]
+    private let smallBlockRanks: [UInt8]
+    private let totalOnes: Int
 
     init(bits: [Bool]) {
-        self.bitCount = bits.count
+        let count = bits.count
+        self.bitCount = count
 
-        var words = Array(repeating: UInt64(0), count: (bits.count + 63) / 64)
-        var zeros: [Int] = []
-        zeros.reserveCapacity(bits.count / 2)
-
-        for (index, bit) in bits.enumerated() {
-            if bit {
-                words[index / 64] |= UInt64(1) << UInt64(index % 64)
-            } else {
-                zeros.append(index)
-            }
+        var ws = [UInt64](repeating: 0, count: (count + 63) / 64)
+        for (i, b) in bits.enumerated() where b {
+            ws[i / 64] |= UInt64(1) << UInt64(i % 64)
         }
-
-        var rankByWord: [Int] = []
-        rankByWord.reserveCapacity(words.count + 1)
-        rankByWord.append(0)
-        for word in words {
-            rankByWord.append(rankByWord[rankByWord.count - 1] + word.nonzeroBitCount)
-        }
-
-        self.words = words
-        self.rank1ByWord = rankByWord
-        self.zeroPositions = zeros
+        self.words = ws
+        self.rank1ByWord = Self.buildRank1ByWord(ws)
+        let (big, small, total) = Self.buildBlockRanks(bitCount: count, words: ws)
+        self.bigBlockRanks   = big
+        self.smallBlockRanks = small
+        self.totalOnes       = total
     }
 
     init(bitCount: Int, words: [UInt64]) {
         self.bitCount = bitCount
-        self.words = words
-
-        var zeros: [Int] = []
-        zeros.reserveCapacity(bitCount / 2)
-
-        if bitCount > 0 {
-            for index in 0..<bitCount {
-                let word = words[index / 64]
-                let bit = (word & (UInt64(1) << UInt64(index % 64))) != 0
-                if !bit {
-                    zeros.append(index)
-                }
-            }
-        }
-
-        var rankByWord: [Int] = []
-        rankByWord.reserveCapacity(words.count + 1)
-        rankByWord.append(0)
-        for word in words {
-            rankByWord.append(rankByWord[rankByWord.count - 1] + word.nonzeroBitCount)
-        }
-
-        self.rank1ByWord = rankByWord
-        self.zeroPositions = zeros
+        self.words    = words
+        self.rank1ByWord = Self.buildRank1ByWord(words)
+        let (big, small, total) = Self.buildBlockRanks(bitCount: bitCount, words: words)
+        self.bigBlockRanks   = big
+        self.smallBlockRanks = small
+        self.totalOnes       = total
     }
 
-    var packedWords: [UInt64] {
-        words
-    }
+    var packedWords: [UInt64] { words }
 
-    var zeroCount: Int {
-        zeroPositions.count
-    }
+    var zeroCount: Int { bitCount - totalOnes }
 
     func rank1(through index: Int) -> Int {
-        guard index >= 0, bitCount > 0 else {
-            return 0
-        }
-
-        let clamped = min(index, bitCount - 1)
+        guard index >= 0, bitCount > 0 else { return 0 }
+        let clamped   = min(index, bitCount - 1)
         let wordIndex = clamped / 64
         let bitOffset = clamped % 64
-        let mask = bitOffset == 63
+        let mask: UInt64 = bitOffset == 63
             ? UInt64.max
-            : ((UInt64(1) << UInt64(bitOffset + 1)) - 1)
-
+            : (UInt64(1) << UInt64(bitOffset + 1)) - 1
         return rank1ByWord[wordIndex] + (words[wordIndex] & mask).nonzeroBitCount
     }
 
     func select0(_ oneBasedRank: Int) -> Int? {
-        guard oneBasedRank > 0, oneBasedRank <= zeroPositions.count else {
-            return nil
+        let totalZeros = bitCount - totalOnes
+        guard oneBasedRank >= 1, oneBasedRank <= totalZeros, bitCount > 0 else { return nil }
+
+        // 1. big block 二分探索
+        var lo = 0, hi = bigBlockRanks.count - 1, bigBlock = 0
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            let zerosBefore = mid * Self.bigBlockBits - bigBlockRanks[mid]
+            if zerosBefore < oneBasedRank { bigBlock = mid; lo = mid + 1 }
+            else { hi = mid - 1 }
         }
-        return zeroPositions[oneBasedRank - 1]
+
+        // 2. small block 線形探索
+        let zerosBeforeBlock = bigBlock * Self.bigBlockBits - bigBlockRanks[bigBlock]
+        let localTarget      = oneBasedRank - zerosBeforeBlock
+        let baseSmall        = bigBlock * Self.smallBlocksPerBig
+        let smallCount       = min(Self.smallBlocksPerBig, smallBlockRanks.count - baseSmall)
+        var smallBlock = 0
+        while smallBlock < smallCount - 1 {
+            let next = smallBlock + 1
+            let zerosBeforeNext = next * Self.smallBlockBits - Int(smallBlockRanks[baseSmall + next])
+            if zerosBeforeNext < localTarget { smallBlock += 1 } else { break }
+        }
+
+        // 3. small block 内ビット走査
+        let zerosBeforeSmall = smallBlock * Self.smallBlockBits - Int(smallBlockRanks[baseSmall + smallBlock])
+        let offsetInSmall    = localTarget - zerosBeforeSmall
+        let smallStart       = bigBlock * Self.bigBlockBits + smallBlock * Self.smallBlockBits
+        var count = 0
+        for off in 0 ..< Self.smallBlockBits {
+            let pos = smallStart + off
+            if pos >= bitCount { break }
+            if ((words[pos / 64] >> UInt64(pos % 64)) & 1) == 0 {
+                count += 1
+                if count == offsetInSmall { return pos }
+            }
+        }
+        return nil
+    }
+
+    // MARK: Private helpers
+
+    private static func buildRank1ByWord(_ words: [UInt64]) -> [Int] {
+        var rank = [Int](repeating: 0, count: words.count + 1)
+        for (i, w) in words.enumerated() { rank[i + 1] = rank[i] + w.nonzeroBitCount }
+        return rank
+    }
+
+    private static func buildBlockRanks(
+        bitCount: Int,
+        words: [UInt64]
+    ) -> (bigBlockRanks: [Int], smallBlockRanks: [UInt8], totalOnes: Int) {
+        let bigCount   = max(1, (bitCount + bigBlockBits  - 1) / bigBlockBits)
+        let smallCount = bigCount * smallBlocksPerBig
+        var bigRanks   = [Int](repeating: 0,   count: bigCount)
+        var smallRanks = [UInt8](repeating: 0, count: smallCount)
+        var ones = 0
+        for bigIdx in 0 ..< bigCount {
+            bigRanks[bigIdx] = ones
+            let bigStart = bigIdx * bigBlockBits
+            for smallIdx in 0 ..< smallBlocksPerBig {
+                let gSmall     = bigIdx * smallBlocksPerBig + smallIdx
+                let smallStart = bigStart + smallIdx * smallBlockBits
+                smallRanks[gSmall] = UInt8(ones - bigRanks[bigIdx])
+                guard smallStart < bitCount else { continue }
+                let smallEnd    = min(smallStart + smallBlockBits, bitCount)
+                let bitsInBlock = smallEnd - smallStart
+                let wordIdx     = smallStart / 64
+                let bitOffset   = smallStart % 64
+                let extracted   = UInt8((words[wordIdx] >> UInt64(bitOffset)) & 0xFF)
+                let masked: UInt8 = bitsInBlock == 8
+                    ? extracted
+                    : extracted & UInt8((1 << bitsInBlock) - 1)
+                ones += masked.nonzeroBitCount
+            }
+        }
+        return (bigRanks, smallRanks, ones)
     }
 }
 

@@ -1,104 +1,249 @@
 import Foundation
 
+// MARK: - CompatibleBitVector
+//
+// Block-based succinct bit vector (Kotlin SuccinctBitVector 移植版)。
+//
+// メモリ構造:
+//   words          : 元の bit 列を 64-bit word に詰めたもの (辞書ファイル由来、変更不可)
+//   rank1ByWord    : word 単位の prefix popcount — rank1() を O(1) で処理するため
+//   bigBlockRanks  : bigBlockBits(=256) 単位の prefix popcount — select の二分探索用
+//   smallBlockRanks: smallBlockBits(=8) 単位の差分 popcount — big block 内線形探索用
+//                    値は big block 先頭からの相対 1-bit 数なので UInt8 に収まる (最大 248)
+//   totalOnes      : 全 1-bit 数
+//
+// 旧実装の zeroPositions / onePositions ([Int] × bitCount 個) を廃止し、
+// Keyboard Extension の辞書ロード時メモリを大幅に削減する。
 struct CompatibleBitVector: Sendable {
     let bitCount: Int
     let words: [UInt64]
 
+    // word-level prefix popcount: rank1ByWord[i] = ones in words[0..<i]
     private let rank1ByWord: [Int]
-    private let zeroPositions: [Int]
-    private let onePositions: [Int]
+
+    // block-based index for select
+    private static let bigBlockBits     = 256
+    private static let smallBlockBits   = 8
+    private static let smallBlocksPerBig = bigBlockBits / smallBlockBits  // 32
+
+    /// bigBlockRanks[i] = 1-bit count in bits [0, i * bigBlockBits)  (absolute)
+    private let bigBlockRanks: [Int]
+    /// smallBlockRanks[bigIdx * smallBlocksPerBig + smallIdx] =
+    ///   1-bit count in bits [bigStart, bigStart + smallIdx * smallBlockBits)
+    ///   relative to big block start → fits in UInt8 (max value = 31 * 8 = 248)
+    private let smallBlockRanks: [UInt8]
+    /// Total number of 1-bits in the entire vector
+    let totalOnes: Int
+
+    // MARK: init(bits:)
 
     init(bits: [Bool]) {
-        self.bitCount = bits.count
+        let count = bits.count
+        self.bitCount = count
 
-        var words = Array(repeating: UInt64(0), count: (bits.count + 63) / 64)
-        var zeros: [Int] = []
-        var ones: [Int] = []
-
-        for (index, bit) in bits.enumerated() {
-            if bit {
-                words[index / 64] |= UInt64(1) << UInt64(index % 64)
-                ones.append(index)
-            } else {
-                zeros.append(index)
-            }
+        var ws = [UInt64](repeating: 0, count: (count + 63) / 64)
+        for (i, b) in bits.enumerated() where b {
+            ws[i / 64] |= UInt64(1) << UInt64(i % 64)
         }
-
-        self.words = words
-        self.rank1ByWord = Self.makeRank(words)
-        self.zeroPositions = zeros
-        self.onePositions = ones
+        self.words = ws
+        self.rank1ByWord = Self.buildRank1ByWord(ws)
+        let (big, small, total) = Self.buildBlockRanks(bitCount: count, words: ws)
+        self.bigBlockRanks   = big
+        self.smallBlockRanks = small
+        self.totalOnes       = total
     }
+
+    // MARK: init(bitCount:words:)  ← MozcArtifactIO.readBitVector が使う。変更不可。
 
     init(bitCount: Int, words: [UInt64]) {
         self.bitCount = bitCount
-        self.words = words
-
-        var zeros: [Int] = []
-        var ones: [Int] = []
-        for index in 0..<bitCount {
-            let bit = ((words[index / 64] >> UInt64(index % 64)) & 1) == 1
-            if bit {
-                ones.append(index)
-            } else {
-                zeros.append(index)
-            }
-        }
-
-        self.rank1ByWord = Self.makeRank(words)
-        self.zeroPositions = zeros
-        self.onePositions = ones
+        self.words    = words
+        self.rank1ByWord = Self.buildRank1ByWord(words)
+        let (big, small, total) = Self.buildBlockRanks(bitCount: bitCount, words: words)
+        self.bigBlockRanks   = big
+        self.smallBlockRanks = small
+        self.totalOnes       = total
     }
 
+    // MARK: Public API
+
+    /// bits[index] を返す。範囲外は false。
     func get(_ index: Int) -> Bool {
-        guard index >= 0, index < bitCount else {
-            return false
-        }
+        guard index >= 0, index < bitCount else { return false }
         return ((words[index / 64] >> UInt64(index % 64)) & 1) == 1
     }
 
+    /// bits[0...index] の 1-bit 数を返す。
     func rank1(_ index: Int) -> Int {
-        guard index >= 0, bitCount > 0 else {
-            return 0
-        }
-        let clamped = min(index, bitCount - 1)
-        let wordIndex = clamped / 64
-        let bitOffset = clamped % 64
-        let mask = bitOffset == 63
+        guard index >= 0, bitCount > 0 else { return 0 }
+        let clamped    = min(index, bitCount - 1)
+        let wordIndex  = clamped / 64
+        let bitOffset  = clamped % 64
+        let mask: UInt64 = bitOffset == 63
             ? UInt64.max
-            : ((UInt64(1) << UInt64(bitOffset + 1)) - 1)
+            : (UInt64(1) << UInt64(bitOffset + 1)) - 1
         return rank1ByWord[wordIndex] + (words[wordIndex] & mask).nonzeroBitCount
     }
 
+    /// bits[0...index] の 0-bit 数を返す。
     func rank0(_ index: Int) -> Int {
-        guard index >= 0, bitCount > 0 else {
-            return 0
-        }
+        guard index >= 0, bitCount > 0 else { return 0 }
         let clamped = min(index, bitCount - 1)
         return clamped + 1 - rank1(clamped)
     }
 
-    func select0(_ oneBasedRank: Int) -> Int {
-        guard oneBasedRank > 0, oneBasedRank <= zeroPositions.count else {
-            return -1
-        }
-        return zeroPositions[oneBasedRank - 1]
-    }
-
+    /// `oneBasedRank` 番目 (1-origin) の 1-bit の位置 (0-origin) を返す。
+    /// 見つからなければ -1。
     func select1(_ oneBasedRank: Int) -> Int {
-        guard oneBasedRank > 0, oneBasedRank <= onePositions.count else {
-            return -1
+        guard oneBasedRank >= 1, oneBasedRank <= totalOnes, bitCount > 0 else { return -1 }
+
+        // 1. big block を二分探索
+        var lo = 0
+        var hi = bigBlockRanks.count - 1
+        var bigBlock = 0
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            if bigBlockRanks[mid] < oneBasedRank {
+                bigBlock = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
         }
-        return onePositions[oneBasedRank - 1]
+
+        // 2. big block 内の small block を線形探索
+        let localTarget  = oneBasedRank - bigBlockRanks[bigBlock]
+        let baseSmall    = bigBlock * Self.smallBlocksPerBig
+        let smallCount   = min(Self.smallBlocksPerBig, smallBlockRanks.count - baseSmall)
+        var smallBlock   = 0
+        while smallBlock < smallCount - 1,
+              Int(smallBlockRanks[baseSmall + smallBlock + 1]) < localTarget {
+            smallBlock += 1
+        }
+
+        // 3. small block 内をビット走査 (最大 8 bit)
+        let offsetInSmall = localTarget - Int(smallBlockRanks[baseSmall + smallBlock])
+        let smallStart    = bigBlock * Self.bigBlockBits + smallBlock * Self.smallBlockBits
+        var count = 0
+        for off in 0 ..< Self.smallBlockBits {
+            let pos = smallStart + off
+            if pos >= bitCount { break }
+            if get(pos) {
+                count += 1
+                if count == offsetInSmall { return pos }
+            }
+        }
+        return -1
     }
 
-    private static func makeRank(_ words: [UInt64]) -> [Int] {
-        var rank = [0]
-        rank.reserveCapacity(words.count + 1)
-        for word in words {
-            rank.append(rank[rank.count - 1] + word.nonzeroBitCount)
+    /// `oneBasedRank` 番目 (1-origin) の 0-bit の位置 (0-origin) を返す。
+    /// 見つからなければ -1。
+    func select0(_ oneBasedRank: Int) -> Int {
+        let totalZeros = bitCount - totalOnes
+        guard oneBasedRank >= 1, oneBasedRank <= totalZeros, bitCount > 0 else { return -1 }
+
+        // 1. big block を二分探索 (zeros before block i = i*bigBlockBits - bigBlockRanks[i])
+        var lo = 0
+        var hi = bigBlockRanks.count - 1
+        var bigBlock = 0
+        while lo <= hi {
+            let mid = (lo + hi) >> 1
+            let zerosBefore = mid * Self.bigBlockBits - bigBlockRanks[mid]
+            if zerosBefore < oneBasedRank {
+                bigBlock = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+
+        // 2. big block 内の small block を線形探索
+        let zerosBeforeBlock = bigBlock * Self.bigBlockBits - bigBlockRanks[bigBlock]
+        let localTarget      = oneBasedRank - zerosBeforeBlock
+        let baseSmall        = bigBlock * Self.smallBlocksPerBig
+        let smallCount       = min(Self.smallBlocksPerBig, smallBlockRanks.count - baseSmall)
+        var smallBlock = 0
+        while smallBlock < smallCount - 1 {
+            let nextSmall      = smallBlock + 1
+            let onesBeforeNext = Int(smallBlockRanks[baseSmall + nextSmall])
+            let zerosBeforeNext = nextSmall * Self.smallBlockBits - onesBeforeNext
+            if zerosBeforeNext < localTarget {
+                smallBlock += 1
+            } else {
+                break
+            }
+        }
+
+        // 3. small block 内をビット走査 (最大 8 bit)
+        let onesBeforeSmall  = Int(smallBlockRanks[baseSmall + smallBlock])
+        let zerosBeforeSmall = smallBlock * Self.smallBlockBits - onesBeforeSmall
+        let offsetInSmall    = localTarget - zerosBeforeSmall
+        let smallStart       = bigBlock * Self.bigBlockBits + smallBlock * Self.smallBlockBits
+        var count = 0
+        for off in 0 ..< Self.smallBlockBits {
+            let pos = smallStart + off
+            if pos >= bitCount { break }
+            if !get(pos) {
+                count += 1
+                if count == offsetInSmall { return pos }
+            }
+        }
+        return -1
+    }
+
+    // MARK: Private helpers
+
+    /// words の word-level prefix popcount 配列を構築する。
+    /// rank1ByWord[i] = ones in words[0..<i]  (size = words.count + 1)
+    private static func buildRank1ByWord(_ words: [UInt64]) -> [Int] {
+        var rank = [Int](repeating: 0, count: words.count + 1)
+        for (i, word) in words.enumerated() {
+            rank[i + 1] = rank[i] + word.nonzeroBitCount
         }
         return rank
+    }
+
+    /// block-based の補助データを構築する。
+    /// 一時的な位置配列 ([Int]) を作らず、直接 bigBlockRanks / smallBlockRanks を埋める。
+    private static func buildBlockRanks(
+        bitCount: Int,
+        words: [UInt64]
+    ) -> (bigBlockRanks: [Int], smallBlockRanks: [UInt8], totalOnes: Int) {
+        let bigCount   = max(1, (bitCount + bigBlockBits  - 1) / bigBlockBits)
+        let smallCount = bigCount * smallBlocksPerBig
+
+        var bigRanks   = [Int](repeating: 0,    count: bigCount)
+        var smallRanks = [UInt8](repeating: 0,  count: smallCount)
+        var ones = 0
+
+        for bigIdx in 0 ..< bigCount {
+            bigRanks[bigIdx] = ones
+            let bigStart = bigIdx * bigBlockBits
+
+            for smallIdx in 0 ..< smallBlocksPerBig {
+                let globalSmall = bigIdx * smallBlocksPerBig + smallIdx
+                let smallStart  = bigStart + smallIdx * smallBlockBits
+
+                // small block 先頭時点での big block 内相対 ones を記録
+                smallRanks[globalSmall] = UInt8(ones - bigRanks[bigIdx])
+
+                guard smallStart < bitCount else { continue }
+
+                // smallBlockBits(8) は 64 の約数なので small block は必ず 1 word 内に収まる。
+                let smallEnd     = min(smallStart + smallBlockBits, bitCount)
+                let bitsInBlock  = smallEnd - smallStart
+                let wordIdx      = smallStart / 64
+                let bitOffset    = smallStart % 64
+                // 当該 small block に対応する 8bit を取り出す
+                let extracted    = UInt8((words[wordIdx] >> UInt64(bitOffset)) & 0xFF)
+                let masked: UInt8 = bitsInBlock == 8
+                    ? extracted
+                    : extracted & UInt8((1 << bitsInBlock) - 1)
+                ones += masked.nonzeroBitCount
+            }
+        }
+
+        return (bigRanks, smallRanks, ones)
     }
 }
 
