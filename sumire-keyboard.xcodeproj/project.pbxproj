@@ -61,11 +61,6 @@
 			path = "sumire-keyboard";
 			sourceTree = "<group>";
 		};
-		C00000000000000000000001 /* sumire-keyboardShared */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "sumire-keyboardShared";
-			sourceTree = "<group>";
-		};
 		A4EBDFB42F93627000764A31 /* sumire-keyboardTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "sumire-keyboardTests";
@@ -78,15 +73,18 @@
 		};
 		B10000000000000000000005 /* sumire-keyboardKeyboard */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			explicitFileTypes = {
-			};
 			explicitFolders = (
 				KanaKanjiResources,
 			);
 			path = "sumire-keyboardKeyboard";
 			sourceTree = "<group>";
 		};
-		C10000000000000000000001 /* KanaKanjiCore */ = {
+		C00000000000000000000001 /* sumire-keyboardShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "sumire-keyboardShared";
+			sourceTree = "<group>";
+		};
+		C10000000000000000000001 /* sumire-keyboardKeyboard/KanaKanjiCore */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "sumire-keyboardKeyboard/KanaKanjiCore";
 			sourceTree = "<group>";
@@ -132,7 +130,7 @@
 				C00000000000000000000001 /* sumire-keyboardShared */,
 				B10000000000000000000005 /* sumire-keyboardKeyboard */,
 				A4EBDFB42F93627000764A31 /* sumire-keyboardTests */,
-				C10000000000000000000001 /* KanaKanjiCore */,
+				C10000000000000000000001 /* sumire-keyboardKeyboard/KanaKanjiCore */,
 				A4EBDFBE2F93627000764A31 /* sumire-keyboardUITests */,
 				A4EBDFA52F93626E00764A31 /* Products */,
 			);
@@ -169,6 +167,7 @@
 			fileSystemSynchronizedGroups = (
 				A4EBDFA62F93626E00764A31 /* sumire-keyboard */,
 				C00000000000000000000001 /* sumire-keyboardShared */,
+				C10000000000000000000001 /* sumire-keyboardKeyboard/KanaKanjiCore */,
 			);
 			name = "sumire-keyboard";
 			packageProductDependencies = (
@@ -192,7 +191,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A4EBDFB42F93627000764A31 /* sumire-keyboardTests */,
-				C10000000000000000000001 /* KanaKanjiCore */,
+				C10000000000000000000001 /* sumire-keyboardKeyboard/KanaKanjiCore */,
 			);
 			name = "sumire-keyboardTests";
 			packageProductDependencies = (

@@ -69,12 +69,37 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case singleKanji
         case english
         case direct
+        case learning
+        case user
+
+        var candidateSourceKind: CandidateSourceKind {
+            switch self {
+            case .main:
+                return .systemMain
+            case .auxiliary:
+                return .systemAuxiliary
+            case .fallback:
+                return .fallback
+            case .singleKanji:
+                return .systemSingleKanji
+            case .english:
+                return .systemEnglish
+            case .direct:
+                return .direct
+            case .learning:
+                return .learning
+            case .user:
+                return .user
+            }
+        }
     }
 
     private struct ConversionCandidateItem: Hashable, Sendable {
         let text: String
+        let reading: String
         let consumedReadingLength: Int
         let source: ConversionCandidateSource
+        let lexicalInfo: CandidateLexicalInfo?
     }
 
     private struct CandidateButtonConfiguration: Hashable {
@@ -93,12 +118,77 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let score: Int
     }
 
-    private struct ConversionCandidateLookupKey: Equatable, Sendable {
+    private struct SystemCandidateSource: CandidateSource {
+        let kind: CandidateSourceKind
+        let exactCandidates: [Candidate]
+
+        func searchExact(reading: String, limit: Int) -> [Candidate] {
+            guard limit > 0 else {
+                return []
+            }
+            return exactCandidates.prefix(limit).map { $0 }
+        }
+
+        func searchCommonPrefix(inputReading: String, limit: Int) -> [Candidate] {
+            []
+        }
+
+        func searchPredictive(prefix: String, limit: Int) -> [Candidate] {
+            []
+        }
+    }
+
+    private struct ConversionCandidateLookupKey: Equatable, Hashable, Sendable {
         let targetText: String
         let language: PrecompositionLanguage
         let omissionSearchEnabled: Bool
         let hasKanaKanjiConverter: Bool
         let hasEnglishEngine: Bool
+    }
+
+    // MARK: - Conversion Result Cache (LRU)
+
+    /// キー入力ごとの変換結果をキャッシュする LRU キャッシュ。
+    /// Backspace や連続入力で同じ読みに戻った際に KanaKanjiConverter の再実行を避ける。
+    /// メインスレッドからのみアクセスすること。
+    private final class ConversionResultCache {
+        private let capacity: Int
+        /// LRU 順序管理 (末尾が最近使用)
+        private var order: [ConversionCandidateLookupKey] = []
+        private var storage: [ConversionCandidateLookupKey: [ConversionCandidateItem]] = [:]
+
+        init(capacity: Int = 64) {
+            self.capacity = capacity
+        }
+
+        /// キャッシュからエントリを取得する。ヒット時は LRU 順序を更新する。
+        func get(_ key: ConversionCandidateLookupKey) -> [ConversionCandidateItem]? {
+            guard let value = storage[key] else { return nil }
+            // Move to most-recently-used position
+            order.removeAll { $0 == key }
+            order.append(key)
+            return value
+        }
+
+        /// キャッシュにエントリを追加する。容量超過時は最も古いエントリを退避する。
+        func set(_ key: ConversionCandidateLookupKey, value: [ConversionCandidateItem]) {
+            if storage[key] != nil {
+                order.removeAll { $0 == key }
+            } else if order.count >= capacity {
+                let lru = order.removeFirst()
+                storage.removeValue(forKey: lru)
+            }
+            order.append(key)
+            storage[key] = value
+        }
+
+        /// キャッシュを全消去する。辞書変更・設定変更・メモリ警告時に使用する。
+        func removeAll() {
+            order.removeAll()
+            storage.removeAll()
+        }
+
+        var count: Int { storage.count }
     }
 
     private enum KeyAction {
@@ -129,7 +219,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case precomposition(PrecompositionStatus)
     }
 
-    private enum PrecompositionLanguage: String, Equatable, Sendable {
+    private enum PrecompositionLanguage: String, Equatable, Hashable, Sendable {
         case japanese
         case english
         case number
@@ -1227,6 +1317,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var underlineRange: Range<Int>?
     private var kanaKanjiConverter: KanaKanjiConverter?
     private var englishEngine: EnglishEngine?
+    private var dictionaryRepositories: DictionaryRepositories?
     private var converterLoadFailureMessage: String?
     private var isLoadingKanaKanjiConverter = false
     private var isLoadingEnglishDictionary = false
@@ -1234,6 +1325,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     private var conversionCandidateLookupKey: ConversionCandidateLookupKey?
     private var conversionCandidateLookupInFlightKey: ConversionCandidateLookupKey?
     private var conversionCandidateLookupResults: [ConversionCandidateItem] = []
+    /// 進行中の変換 Task。新しい入力が来たらキャンセルしてデバウンスをリセットする。
+    private var conversionLookupTask: Task<Void, Never>?
+    /// 変換結果の LRU キャッシュ。Backspace・連続入力での再変換コストを削減する。
+    private let conversionResultCache = ConversionResultCache()
     private var candidateListCandidates: [ConversionCandidateItem] = []
     private var candidateListSelectedCandidateIndex: Int?
     private var candidateBarDataSource: UICollectionViewDiffableDataSource<CandidateBarSection, CandidateButtonConfiguration>?
@@ -1333,6 +1428,7 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.viewDidLoad()
 
         _ = syncSumireKeyboardSettings()
+        dictionaryRepositories = try? DictionaryRepositoryContainer.makeDefault()
         configureInputStatusForCurrentSumireKeyboard()
         view.backgroundColor = KeyboardTheme.keyboardBackground
         view.clipsToBounds = false
@@ -1368,8 +1464,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.viewWillDisappear(animated)
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionLookupTask?.cancel()
+        conversionLookupTask = nil
         conversionCandidateLookupGeneration += 1
         conversionCandidateLookupInFlightKey = nil
+        conversionResultCache.removeAll()
         stopDeleteRepeat()
         stopCursorRepeat()
         cursorMoveController.cancelTracking()
@@ -1382,10 +1481,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         super.didReceiveMemoryWarning()
         scheduledKanaKanjiLoad?.cancel()
         scheduledKanaKanjiLoad = nil
+        conversionLookupTask?.cancel()
+        conversionLookupTask = nil
         conversionCandidateLookupGeneration += 1
         conversionCandidateLookupKey = nil
         conversionCandidateLookupInFlightKey = nil
         conversionCandidateLookupResults.removeAll()
+        conversionResultCache.removeAll()
         kanaKanjiLoadGeneration += 1
         isLoadingKanaKanjiConverter = false
         isLoadingEnglishDictionary = false
@@ -3389,8 +3491,20 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
     }
 
     private func commitCandidateItem(_ candidate: ConversionCandidateItem) {
+        let committedSelection = CommittedSelection(
+            inputReading: conversionTargetText(),
+            candidateReading: candidate.reading,
+            word: candidate.text,
+            sourceKind: candidate.source.candidateSourceKind,
+            lexicalInfo: candidate.lexicalInfo,
+            committedAt: Date()
+        )
         resetMultiTapState()
-        commitComposingText(candidate.text, consumedReadingLength: candidate.consumedReadingLength)
+        commitComposingText(
+            candidate.text,
+            consumedReadingLength: candidate.consumedReadingLength,
+            committedSelection: committedSelection
+        )
     }
 
     @objc private func handleEnterLongPress(_ gesture: UILongPressGestureRecognizer) {
@@ -4777,6 +4891,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         let nextOmissionSearchEnabled = KeyboardSettings.omissionSearchEnabled
         if omissionSearchEnabled != nextOmissionSearchEnabled {
             omissionSearchEnabled = nextOmissionSearchEnabled
+            // omissionSearchEnabled は ConversionCandidateLookupKey の構成要素なので
+            // 設定変更時はキャッシュを破棄して次回変換から新設定を反映させる
+            conversionResultCache.removeAll()
+            NSLog("[Conversion] Cache cleared — omissionSearchEnabled changed to %@",
+                  nextOmissionSearchEnabled ? "true" : "false")
             shouldRenderComposition = true
             shouldUpdatePreedit = true
         }
@@ -4965,7 +5084,11 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         }
     }
 
-    private func commitComposingText(_ text: String, consumedReadingLength: Int? = nil) {
+    private func commitComposingText(
+        _ text: String,
+        consumedReadingLength: Int? = nil,
+        committedSelection: CommittedSelection? = nil
+    ) {
         guard composingText.isEmpty == false else {
             return
         }
@@ -5010,6 +5133,26 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             syncPrecompositionPhaseForCurrentText()
         }
         updatePreedit()
+
+        guard let committedSelection,
+              let learningRepository = dictionaryRepositories?.learningRepository else {
+            return
+        }
+
+        Task { [weak self] in
+            do {
+                try await learningRepository.recordCommittedSelection(committedSelection)
+                // 学習辞書が更新されると同じ読みに対する変換結果が変わる可能性があるため
+                // キャッシュを破棄して次回の変換に最新の学習データを反映させる
+                await MainActor.run {
+                    self?.conversionResultCache.removeAll()
+                    NSLog("[Conversion] Cache cleared — learning dictionary updated for '%@'",
+                          committedSelection.inputReading)
+                }
+            } catch {
+                NSLog("Failed to record learning dictionary selection: %@", error.localizedDescription)
+            }
+        }
     }
 
     private func commitRenderedComposingTextAsTyped() {
@@ -5320,18 +5463,36 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             hasEnglishEngine: englishEngine != nil
         )
 
+        // (1) 前回と同じキー → すでに持っている結果をそのまま返す
         if conversionCandidateLookupKey == key {
             return conversionCandidateLookupResults
         }
 
+        // (2) キャッシュヒット → 同期で即座に結果を返す（Backspace・連続入力の高速化）
+        if let cached = conversionResultCache.get(key) {
+            NSLog("[Conversion] Cache HIT (sync) for '%@' (%d candidates)", key.targetText, cached.count)
+            conversionCandidateLookupKey = key
+            conversionCandidateLookupResults = cached
+            conversionCandidateLookupInFlightKey = nil
+            // 同じキーに向けて待機中の Task があればキャンセルする
+            conversionLookupTask?.cancel()
+            conversionLookupTask = nil
+            return cached
+        }
+
+        // (3) キャッシュミス → デバウンス付き非同期変換をスケジュール
         scheduleConversionCandidateLookup(for: key)
         return Self.immediateCandidateItems(for: targetText, language: language)
     }
 
     private func scheduleConversionCandidateLookup(for key: ConversionCandidateLookupKey) {
+        // すでに同じキーで変換中なら重複起動しない
         guard conversionCandidateLookupInFlightKey != key else {
             return
         }
+
+        // 前回の待機中 Task をキャンセル（デバウンスリセット）
+        conversionLookupTask?.cancel()
 
         conversionCandidateLookupGeneration += 1
         let lookupGeneration = conversionCandidateLookupGeneration
@@ -5339,39 +5500,80 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         conversionCandidateLookupResults.removeAll()
         conversionCandidateLookupInFlightKey = key
 
+        NSLog("[Conversion] Scheduled lookup for '%@' (gen %d)", key.targetText, lookupGeneration)
+
+        // 変換に必要な値をメインスレッドで先にキャプチャしてから Task に渡す
         let kanaKanjiConverter = kanaKanjiConverter
         let englishEngine = englishEngine
         let conversionCandidateLimit = conversionCandidateLimit
         let auxiliaryConversionCandidateLimit = auxiliaryConversionCandidateLimit
         let singleKanjiConversionCandidateLimit = singleKanjiConversionCandidateLimit
         let conversionBeamWidth = conversionBeamWidth
+        let dictionaryCandidateSources: [any CandidateSource]
+        if let dictionaryRepositories {
+            dictionaryCandidateSources = [
+                dictionaryRepositories.userCandidateSource,
+                dictionaryRepositories.learningCandidateSource
+            ]
+        } else {
+            dictionaryCandidateSources = []
+        }
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            let candidates = Self.buildCandidateItems(
-                targetText: key.targetText,
-                language: key.language,
-                kanaKanjiConverter: kanaKanjiConverter,
-                englishEngine: englishEngine,
-                conversionCandidateLimit: conversionCandidateLimit,
-                auxiliaryConversionCandidateLimit: auxiliaryConversionCandidateLimit,
-                singleKanjiConversionCandidateLimit: singleKanjiConversionCandidateLimit,
-                conversionBeamWidth: conversionBeamWidth,
-                omissionSearchEnabled: key.omissionSearchEnabled
-            )
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      self.conversionCandidateLookupGeneration == lookupGeneration,
-                      self.currentConversionCandidateLookupKey() == key else {
-                    return
-                }
-
-                self.conversionCandidateLookupInFlightKey = nil
-                self.conversionCandidateLookupKey = key
-                self.conversionCandidateLookupResults = candidates
-                self.renderCurrentComposingText()
-                self.updatePreedit()
+        conversionLookupTask = Task { [weak self] in
+            // ── デバウンス: 50ms 待機 ──────────────────────────────────────────
+            // 新しい入力が来て Task がキャンセルされると CancellationError がスローされる
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+            } catch {
+                NSLog("[Conversion] Debounce cancelled (gen %d) — newer input arrived", lookupGeneration)
+                return
             }
+
+            guard let self, !Task.isCancelled else {
+                NSLog("[Conversion] Task cancelled before build (gen %d)", lookupGeneration)
+                return
+            }
+
+            // ── 変換実行 (バックグラウンドスレッド) ───────────────────────────
+            NSLog("[Conversion] Starting KanaKanjiConverter for '%@' (gen %d)", key.targetText, lookupGeneration)
+            let candidates: [ConversionCandidateItem] = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = Self.buildCandidateItems(
+                        targetText: key.targetText,
+                        language: key.language,
+                        kanaKanjiConverter: kanaKanjiConverter,
+                        englishEngine: englishEngine,
+                        conversionCandidateLimit: conversionCandidateLimit,
+                        auxiliaryConversionCandidateLimit: auxiliaryConversionCandidateLimit,
+                        singleKanjiConversionCandidateLimit: singleKanjiConversionCandidateLimit,
+                        conversionBeamWidth: conversionBeamWidth,
+                        omissionSearchEnabled: key.omissionSearchEnabled,
+                        dictionaryCandidateSources: dictionaryCandidateSources
+                    )
+                    continuation.resume(returning: result)
+                }
+            }
+
+            // ── 結果の適用 ────────────────────────────────────────────────────
+            // キャンセル済み・世代が古い・現在のキーが変わっている場合は破棄する
+            guard !Task.isCancelled,
+                  self.conversionCandidateLookupGeneration == lookupGeneration,
+                  self.currentConversionCandidateLookupKey() == key else {
+                NSLog("[Conversion] Stale result discarded (gen %d, current gen %d)",
+                      lookupGeneration, self.conversionCandidateLookupGeneration)
+                return
+            }
+
+            // キャッシュに書き込む（次回同じ読みへの Backspace 時に即座に利用できる）
+            self.conversionResultCache.set(key, value: candidates)
+            NSLog("[Conversion] Result cached for '%@' (gen %d, %d candidates, cache size: %d)",
+                  key.targetText, lookupGeneration, candidates.count, self.conversionResultCache.count)
+
+            self.conversionCandidateLookupInFlightKey = nil
+            self.conversionCandidateLookupKey = key
+            self.conversionCandidateLookupResults = candidates
+            self.renderCurrentComposingText()
+            self.updatePreedit()
         }
     }
 
@@ -5405,26 +5607,31 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         auxiliaryConversionCandidateLimit: Int,
         singleKanjiConversionCandidateLimit: Int,
         conversionBeamWidth: Int,
-        omissionSearchEnabled: Bool
+        omissionSearchEnabled: Bool,
+        dictionaryCandidateSources: [any CandidateSource] = []
     ) -> [ConversionCandidateItem] {
-        var seen = Set<String>()
-        var candidates: [ConversionCandidateItem] = []
+        var seenSystemText = Set<String>()
+        var systemCandidates: [Candidate] = []
 
-        func appendUnique(
+        func appendSystemCandidate(
             _ text: String,
+            reading: String = targetText,
             consumedReadingLength: Int = targetText.count,
-            source: ConversionCandidateSource
+            source: ConversionCandidateSource,
+            lexicalInfo: CandidateLexicalInfo? = nil
         ) {
             guard text.isEmpty == false,
                   isDisplayableConversionCandidate(text),
-                  seen.insert(text).inserted else {
+                  seenSystemText.insert(text).inserted else {
                 return
             }
             let consumedLength = min(max(consumedReadingLength, 0), targetText.count)
-            candidates.append(ConversionCandidateItem(
-                text: text,
+            systemCandidates.append(Candidate(
+                reading: reading,
+                word: text,
                 consumedReadingLength: consumedLength,
-                source: source
+                sourceKind: source.candidateSourceKind,
+                lexicalInfo: lexicalInfo
             ))
         }
 
@@ -5434,14 +5641,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .english:
             if let englishEngine {
                 for candidate in englishEngine.getPrediction(input: targetText).prefix(conversionCandidateLimit) {
-                    appendUnique(candidate.word, source: .english)
+                    appendSystemCandidate(
+                        candidate.word,
+                        reading: candidate.reading,
+                        source: .english
+                    )
                 }
             }
-            appendUnique(targetText, source: .fallback)
-            return candidates
+            appendSystemCandidate(targetText, source: .fallback)
+            return mergeCandidateItems(
+                systemCandidates: systemCandidates,
+                dictionaryCandidateSources: dictionaryCandidateSources,
+                inputReading: targetText,
+                totalLimit: max(systemCandidates.count + dictionaryCandidateSources.count * conversionCandidateLimit, conversionCandidateLimit),
+                includesAuxiliaryCandidates: true
+            )
         case .number:
-            appendUnique(targetText, source: .direct)
-            return candidates
+            appendSystemCandidate(targetText, source: .direct)
+            return mergeCandidateItems(
+                systemCandidates: systemCandidates,
+                dictionaryCandidateSources: [],
+                inputReading: targetText,
+                totalLimit: max(systemCandidates.count, conversionCandidateLimit),
+                includesAuxiliaryCandidates: false
+            )
         }
 
         if let kanaKanjiConverter {
@@ -5466,7 +5689,13 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             )
 
             for candidate in kanaKanjiConverter.convert(targetText, options: mainOptions) {
-                appendUnique(candidate.text, source: .main)
+                appendSystemCandidate(
+                    candidate.text,
+                    reading: candidate.reading,
+                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                    source: .main,
+                    lexicalInfo: lexicalInfo(from: candidate)
+                )
             }
 
             let auxiliaryOptions = ConversionOptions(
@@ -5488,8 +5717,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
                     ScoredConversionCandidateItem(
                         item: ConversionCandidateItem(
                             text: candidate.text,
+                            reading: candidate.reading,
                             consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
-                            source: .auxiliary
+                            source: .auxiliary,
+                            lexicalInfo: lexicalInfo(from: candidate)
                         ),
                         score: candidate.score
                     )
@@ -5502,28 +5733,126 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             ))
 
             for candidate in auxiliaryCandidates.sorted(by: scoredCandidateSort) {
-                appendUnique(
+                appendSystemCandidate(
                     candidate.item.text,
+                    reading: candidate.item.reading,
                     consumedReadingLength: candidate.item.consumedReadingLength,
-                    source: candidate.item.source
+                    source: candidate.item.source,
+                    lexicalInfo: candidate.item.lexicalInfo
                 )
             }
 
             for candidate in singleKanjiCandidates {
-                appendUnique(candidate.text, source: .singleKanji)
+                appendSystemCandidate(
+                    candidate.text,
+                    reading: candidate.reading,
+                    consumedReadingLength: candidate.consumedLength ?? candidate.reading.count,
+                    source: .singleKanji,
+                    lexicalInfo: lexicalInfo(from: candidate)
+                )
             }
         } else {
             for candidate in fallbackScoredCandidates(for: targetText, baseScore: ConversionOptions().unknownWordCost)
                 .sorted(by: scoredCandidateSort) {
-                appendUnique(
+                appendSystemCandidate(
                     candidate.item.text,
+                    reading: candidate.item.reading,
                     consumedReadingLength: candidate.item.consumedReadingLength,
-                    source: candidate.item.source
+                    source: candidate.item.source,
+                    lexicalInfo: candidate.item.lexicalInfo
                 )
             }
         }
 
-        return candidates
+        return mergeCandidateItems(
+            systemCandidates: systemCandidates,
+            dictionaryCandidateSources: dictionaryCandidateSources,
+            inputReading: targetText,
+            totalLimit: max(
+                systemCandidates.count + dictionaryCandidateSources.count * conversionCandidateLimit,
+                conversionCandidateLimit + auxiliaryConversionCandidateLimit + singleKanjiConversionCandidateLimit
+            ),
+            includesAuxiliaryCandidates: true
+        )
+    }
+
+    nonisolated private static func mergeCandidateItems(
+        systemCandidates: [Candidate],
+        dictionaryCandidateSources: [any CandidateSource],
+        inputReading: String,
+        totalLimit: Int,
+        includesAuxiliaryCandidates: Bool
+    ) -> [ConversionCandidateItem] {
+        let effectiveLimit = max(totalLimit, 0)
+        guard effectiveLimit > 0 else {
+            return []
+        }
+
+        // システム候補を source kind ごとにグループ化して SystemCandidateSource に変換する。
+        // こうすることで user/learning dictionary 候補と system 候補を単一のパイプラインに
+        // 通せるようになり、同じ reading+word を持つ候補が sourcePriority に基づいて
+        // 正しく残される（先入れ優先の appendUniqueCandidate によって user/learning 候補が
+        // 消える問題を解消する）。
+        var systemByKind: [CandidateSourceKind: [Candidate]] = [:]
+        for candidate in systemCandidates {
+            systemByKind[candidate.sourceKind, default: []].append(candidate)
+        }
+        let systemSources: [any CandidateSource] = systemByKind.map { kind, candidates in
+            SystemCandidateSource(kind: kind, exactCandidates: candidates)
+        }
+
+        // dictionaryCandidateSources (user, learning) を前に並べるが、
+        // 最終的な順序は mergePolicy.sourcePriority が制御するため挿入順は影響しない。
+        let allSources: [any CandidateSource] = dictionaryCandidateSources + systemSources
+
+        let mergePolicy = CandidateMergePolicy(
+            sourcePriority: [.user, .learning, .systemMain, .systemAuxiliary, .systemSingleKanji, .systemEnglish, .fallback, .direct],
+            scoreStrategy: .max,
+            totalLimit: effectiveLimit,
+            includesAuxiliaryCandidates: includesAuxiliaryCandidates
+        )
+        let pipeline = CandidatePipeline(sources: allSources, mergePolicy: mergePolicy)
+
+        return pipeline.candidates(for: inputReading, limit: effectiveLimit).map { candidate in
+            ConversionCandidateItem(
+                text: candidate.word,
+                reading: candidate.reading,
+                consumedReadingLength: min(max(candidate.consumedReadingLength, 0), inputReading.count),
+                source: conversionCandidateSource(from: candidate.sourceKind),
+                lexicalInfo: candidate.lexicalInfo
+            )
+        }
+    }
+
+    nonisolated private static func lexicalInfo(from candidate: ConversionCandidate) -> CandidateLexicalInfo? {
+        guard let leftId = candidate.leftId,
+              let rightId = candidate.rightId else {
+            return nil
+        }
+        return CandidateLexicalInfo(score: candidate.score, leftId: leftId, rightId: rightId)
+    }
+
+    nonisolated private static func conversionCandidateSource(
+        from sourceKind: CandidateSourceKind
+    ) -> ConversionCandidateSource {
+        switch sourceKind {
+        case .systemMain:
+            return .main
+        case .systemAuxiliary:
+            return .auxiliary
+        case .systemSingleKanji:
+            return .singleKanji
+        case .systemEnglish:
+            return .english
+        case .learning:
+            return .learning
+        case .user:
+            return .user
+        case .fallback:
+            return .fallback
+        case .direct:
+            return .direct
+        }
     }
 
     nonisolated private static func immediateCandidateItems(
@@ -5538,8 +5867,10 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
         case .english, .number:
             return [ConversionCandidateItem(
                 text: targetText,
+                reading: targetText,
                 consumedReadingLength: targetText.count,
-                source: language == .english ? .fallback : .direct
+                source: language == .english ? .fallback : .direct,
+                lexicalInfo: nil
             )]
         }
     }
@@ -5552,24 +5883,30 @@ final class KeyboardViewController: UIInputViewController, UICollectionViewDataS
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: targetText,
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore
             ),
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: katakanaText(from: targetText),
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore + 100
             ),
             ScoredConversionCandidateItem(
                 item: ConversionCandidateItem(
                     text: halfWidthKatakanaText(from: targetText),
+                    reading: targetText,
                     consumedReadingLength: targetText.count,
-                    source: .fallback
+                    source: .fallback,
+                    lexicalInfo: nil
                 ),
                 score: baseScore + 200
             )
